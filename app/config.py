@@ -1,0 +1,45 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from functools import lru_cache
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # Network
+    network_range: str = "192.168.1.0/24"
+    scan_interval_seconds: int = 60
+
+    # Camera
+    camera_onvif_user: str = "admin"
+    camera_onvif_password: str = ""
+
+    # NAS
+    nas_mode: str = "mount"  # mount | smb
+    nas_mount_path: str = "/nas/cameras"
+    nas_smb_host: str = ""
+    nas_smb_share: str = ""
+    nas_smb_user: str = ""
+    nas_smb_password: str = ""
+
+    # Recording
+    recording_temp_dir: str = "/tmp/recordings"
+    recording_segment_seconds: int = 1800
+    recording_retention_days: int = 30
+
+    # App
+    jwt_secret_key: str = "change_me_to_a_random_string_at_least_32_chars"
+    admin_username: str = "admin"
+    admin_password: str = "change_me"
+    log_level: str = "INFO"
+    debug: bool = False
+
+    # Database
+    database_url: str = "sqlite+aiosqlite:///./data/smart_home.db"
+
+    # App meta
+    app_version: str = "1.0.0"
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
