@@ -14,11 +14,12 @@ class RecordingTask:
     started_at: datetime
     segment_seconds: int
     rtsp_url: str
+    recording_id: int | None = None
 
 
 class Recorder:
     def __init__(self, temp_dir: str):
-        self.temp_dir = Path(temp_dir)
+        self.temp_dir = Path(temp_dir).resolve()
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.active: dict[str, RecordingTask] = {}
         self._monitor_task: asyncio.Task | None = None
@@ -50,9 +51,10 @@ class Recorder:
             "ffmpeg", "-y",
             "-rtsp_transport", "tcp",
             "-i", rtsp_url,
-            "-c", "copy",
+            "-c:v", "copy",
+            "-c:a", "aac",
             "-t", str(segment_seconds),
-            "-movflags", "+faststart",
+            "-movflags", "+frag_keyframe+empty_moov",
             str(output_path),
         ]
 
@@ -60,7 +62,7 @@ class Recorder:
         loop = asyncio.get_event_loop()
         proc = await loop.run_in_executor(
             None,
-            lambda: subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE),
+            lambda: subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE),
         )
 
         self.active[camera_mac] = RecordingTask(
@@ -79,16 +81,50 @@ class Recorder:
             return None
         logger.info(f"停止录制: {camera_mac}")
         try:
-            task.process.send_signal(2)  # SIGINT → FFmpeg 正常写文件尾
+            task.process.stdin.write(b"q")
+            task.process.stdin.flush()
+            task.process.stdin.close()
         except Exception:
             pass
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: task.process.wait(timeout=10))
+        try:
+            await loop.run_in_executor(None, lambda: task.process.wait(timeout=15))
+        except subprocess.TimeoutExpired:
+            logger.warning(f"FFmpeg 未在15秒内退出，强制终止: {camera_mac}")
+            task.process.kill()
+            # Windows 需要额外时间释放文件句柄
+            await asyncio.sleep(2.0)
         if task.process.poll() is None:
             task.process.kill()
-        if task.output_path.exists() and task.output_path.stat().st_size > 0:
-            return task.output_path
-        return None
+            await asyncio.sleep(2.0)
+        # Read stderr for diagnostics before checking the file
+        try:
+            stderr_out = task.process.stderr.read(8192).decode(errors="replace").strip()
+            if stderr_out:
+                logger.debug(f"FFmpeg stderr [{camera_mac}]: {stderr_out[-300:]}")
+        except Exception:
+            pass
+
+        min_valid_bytes = 10 * 1024  # MP4 must contain at least ftyp + moov + mdat
+        # Retry file access — Windows may hold handles briefly after process exit
+        for attempt in range(3):
+            try:
+                if not task.output_path.exists():
+                    logger.warning(f"录制文件不存在（FFmpeg未写入数据）: {task.output_path}")
+                    return None
+                size = task.output_path.stat().st_size
+                if size > min_valid_bytes:
+                    return task.output_path
+                logger.warning(f"录制文件过小({size}字节，丢弃): {task.output_path}")
+                task.output_path.unlink()
+                return None
+            except PermissionError:
+                if attempt < 2:
+                    logger.warning(f"文件被占用，重试 ({attempt + 1}/3): {task.output_path}")
+                    await asyncio.sleep(0.5)
+                else:
+                    logger.error(f"文件持续被占用，跳过删除: {task.output_path}")
+                    return None
 
     async def _monitor_loop(self):
         while True:

@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, status, BackgroundTasks, Query
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from app.deps import DBDep, CurrentUser
+from app.database import AsyncSessionLocal
 from app.models.device import Device
 from app.schemas.device import DeviceOut, DeviceUpdate
 from app.schemas import PagedResponse
@@ -47,39 +48,40 @@ async def list_devices(
 
 
 @router.post("/scan", status_code=status.HTTP_202_ACCEPTED, tags=["devices"])
-async def trigger_scan(background_tasks: BackgroundTasks, db: DBDep, _: CurrentUser):
+async def trigger_scan(background_tasks: BackgroundTasks, _: CurrentUser):
     settings = get_settings()
     scanner = Scanner(settings.network_range)
-    background_tasks.add_task(_run_scan, scanner, db)
+    background_tasks.add_task(_run_scan, scanner)
     return {"message": "扫描已启动，结果通过 WebSocket 推送"}
 
 
-async def _run_scan(scanner: Scanner, db):
+async def _run_scan(scanner: Scanner):
     await ws_manager.broadcast("scan_started", {})
     try:
         devices = await scanner.arp_scan()
         results = {"found": len(devices), "new": 0, "offline": 0}
 
-        for d in devices:
-            vendor = await scanner.lookup_vendor(d["mac"])
-            existing = await db.execute(select(Device).where(Device.mac == d["mac"]))
-            existing = existing.scalar_one_or_none()
-            if existing:
-                existing.ip = d["ip"]
-                existing.vendor = vendor
-                existing.is_online = True
-                existing.last_seen = datetime.now()
-            else:
-                results["new"] += 1
-                ports = await scanner.probe_ports(d["ip"])
-                device_type = scanner.guess_device_type(vendor, ports)
-                db.add(Device(
-                    mac=d["mac"], ip=d["ip"], vendor=vendor,
-                    device_type=device_type, is_online=True,
-                    last_seen=datetime.now(),
-                ))
+        async with AsyncSessionLocal() as db:
+            for d in devices:
+                vendor = await scanner.lookup_vendor(d["mac"])
+                existing = await db.execute(select(Device).where(Device.mac == d["mac"]))
+                existing = existing.scalar_one_or_none()
+                if existing:
+                    existing.ip = d["ip"]
+                    existing.vendor = vendor
+                    existing.is_online = True
+                    existing.last_seen = datetime.now()
+                else:
+                    results["new"] += 1
+                    ports = await scanner.probe_ports(d["ip"])
+                    device_type = scanner.guess_device_type(vendor, ports)
+                    db.add(Device(
+                        mac=d["mac"], ip=d["ip"], vendor=vendor,
+                        device_type=device_type, is_online=True,
+                        last_seen=datetime.now(),
+                    ))
 
-        await db.commit()
+            await db.commit()
         await ws_manager.broadcast("scan_completed", results)
         logger.info(f"扫描完成: {results}")
     except Exception as e:

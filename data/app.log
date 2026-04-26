@@ -1,6 +1,0 @@
-2026-04-24 18:52:46.158 | INFO     | app.main:lifespan:28 - 智能家居后端启动中...
-2026-04-24 18:52:46.222 | INFO     | app.main:lifespan:30 - 数据库初始化完成
-2026-04-24 18:52:46.230 | INFO     | app.services.scheduler_service:start:15 - APScheduler 已启动
-2026-04-24 18:52:46.230 | INFO     | app.services.recorder:start_monitor:34 - RecordingMonitor 已启动
-2026-04-24 18:52:49.513 | ERROR    | app.services.nas_syncer:check_writable:69 - NAS 健康检查失败: [Errno 2] No such file or directory: '\\nas\\cameras\\.health_check'
-2026-04-24 18:52:59.234 | ERROR    | app.services.nas_syncer:check_writable:69 - NAS 健康检查失败: [Errno 2] No such file or directory: '\\nas\\cameras\\.health_check'

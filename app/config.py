@@ -13,8 +13,9 @@ class Settings(BaseSettings):
     camera_onvif_user: str = "admin"
     camera_onvif_password: str = ""
 
-    # NAS
-    nas_mode: str = "mount"  # mount | smb
+    # NAS / 本地存储
+    nas_mode: str = "local"  # local | mount | smb
+    local_storage_path: str = "./data/recordings"
     nas_mount_path: str = "/nas/cameras"
     nas_smb_host: str = ""
     nas_smb_share: str = ""

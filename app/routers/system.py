@@ -38,6 +38,7 @@ async def health_check():
     settings = get_settings()
     nas_syncer = NasSyncer(
         mode=settings.nas_mode,
+        local_storage_path=settings.local_storage_path,
         mount_path=settings.nas_mount_path,
         smb_host=settings.nas_smb_host,
         smb_share=settings.nas_smb_share,

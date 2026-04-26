@@ -8,3 +8,13 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local environment files
+.env
+
+# Local recording data
+data/recordings/
+
+# Local runtime data
+data/*.db
+data/*.log

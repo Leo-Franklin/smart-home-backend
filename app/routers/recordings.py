@@ -1,12 +1,35 @@
 import math
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select, func
 from pathlib import Path
+from typing import Annotated
 from app.deps import DBDep, CurrentUser
 from app.models.recording import Recording
 from app.schemas.recording import RecordingOut
 from app.schemas import PagedResponse
+from app.auth import verify_token
+from app.config import get_settings
+
+bearer = HTTPBearer(auto_error=False)
+
+
+async def get_stream_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    token: str | None = None,
+) -> str:
+    raw = credentials.credentials if credentials else token
+    if not raw:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    settings = get_settings()
+    username = verify_token(raw, settings.jwt_secret_key)
+    if username is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return username
+
+
+StreamUser = Annotated[str, Depends(get_stream_user)]
 
 router = APIRouter(prefix="/recordings", tags=["recordings"])
 
@@ -48,17 +71,22 @@ async def get_recording(recording_id: int, db: DBDep, _: CurrentUser):
 
 
 @router.get("/{recording_id}/stream")
-async def stream_recording(recording_id: int, request: Request, db: DBDep, _: CurrentUser):
+async def stream_recording(recording_id: int, request: Request, db: DBDep, _: StreamUser):
     result = await db.execute(select(Recording).where(Recording.id == recording_id))
     recording = result.scalar_one_or_none()
     if not recording:
         raise HTTPException(status_code=404, detail="录像不存在")
+
+    if recording.status not in ("completed", "synced"):
+        raise HTTPException(status_code=409, detail="录像尚未完成，无法播放")
 
     file_path = Path(recording.file_path)
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="文件不存在")
 
     file_size = file_path.stat().st_size
+    if file_size < 10 * 1024:
+        raise HTTPException(status_code=422, detail="录像文件损坏或过小，无法播放")
     range_header = request.headers.get("range")
 
     if range_header:
@@ -107,6 +135,9 @@ async def delete_recording(recording_id: int, db: DBDep, _: CurrentUser):
         raise HTTPException(status_code=404, detail="录像不存在")
     file_path = Path(recording.file_path)
     if file_path.exists():
-        file_path.unlink()
+        try:
+            file_path.unlink()
+        except OSError as e:
+            raise HTTPException(status_code=409, detail=f"文件正在使用中，请先关闭播放器再删除：{e.strerror}")
     await db.delete(recording)
     await db.commit()

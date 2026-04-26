@@ -1,10 +1,12 @@
 from typing import Annotated
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.auth import verify_token
 from app.config import get_settings
+from app.services.recorder import Recorder
+from app.services.nas_syncer import NasSyncer
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -23,4 +25,14 @@ async def get_current_user(
     return username
 
 
+def get_recorder(request: Request) -> Recorder:
+    return request.app.state.recorder
+
+
+def get_nas_syncer(request: Request) -> NasSyncer:
+    return request.app.state.nas_syncer
+
+
 CurrentUser = Annotated[str, Depends(get_current_user)]
+RecorderDep = Annotated[Recorder, Depends(get_recorder)]
+NasSyncerDep = Annotated[NasSyncer, Depends(get_nas_syncer)]
