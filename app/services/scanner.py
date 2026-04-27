@@ -109,6 +109,38 @@ class Scanner:
             results.append({"ip": ip_match.group(1), "mac": mac})
         return results
 
+    async def resolve_hostname(self, ip: str) -> str | None:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._resolve_hostname_sync, ip)
+
+    def _resolve_hostname_sync(self, ip: str) -> str | None:
+        try:
+            hostname, _, _ = socket.gethostbyaddr(ip)
+            return hostname
+        except Exception:
+            return None
+
+    async def measure_latency(self, ip: str) -> float | None:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._measure_latency_sync, ip)
+
+    def _measure_latency_sync(self, ip: str) -> float | None:
+        try:
+            if sys.platform == "win32":
+                cmd = ["ping", "-n", "1", "-w", "1000", str(ip)]
+                # Matches "平均 = 12ms" (Simplified Chinese) or "Average = 12ms" (English)
+                pattern = r"(?:平均|Average)\s*[=<]\s*(\d+)\s*ms"
+            else:
+                cmd = ["ping", "-c", "1", "-W", "1", str(ip)]
+                pattern = r"time=(\d+\.?\d*) ms"
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            m = re.search(pattern, result.stdout, re.IGNORECASE)
+            if m:
+                return float(m.group(1))
+        except Exception:
+            pass
+        return None
+
     async def lookup_vendor(self, mac: str) -> str:
         if self._mac_lookup is None:
             return "Unknown"

@@ -1,3 +1,5 @@
+import asyncio
+import json
 import math
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, status, BackgroundTasks, Query
@@ -63,12 +65,17 @@ async def _run_scan(scanner: Scanner):
 
         async with AsyncSessionLocal() as db:
             for d in devices:
-                vendor = await scanner.lookup_vendor(d["mac"])
-                existing = await db.execute(select(Device).where(Device.mac == d["mac"]))
-                existing = existing.scalar_one_or_none()
+                vendor, hostname, latency = await asyncio.gather(
+                    scanner.lookup_vendor(d["mac"]),
+                    scanner.resolve_hostname(d["ip"]),
+                    scanner.measure_latency(d["ip"]),
+                )
+                existing = (await db.execute(select(Device).where(Device.mac == d["mac"]))).scalar_one_or_none()
                 if existing:
                     existing.ip = d["ip"]
                     existing.vendor = vendor
+                    existing.hostname = hostname
+                    existing.response_time_ms = latency
                     existing.is_online = True
                     existing.last_seen = datetime.now()
                 else:
@@ -77,6 +84,8 @@ async def _run_scan(scanner: Scanner):
                     device_type = scanner.guess_device_type(vendor, ports)
                     db.add(Device(
                         mac=d["mac"], ip=d["ip"], vendor=vendor,
+                        hostname=hostname, response_time_ms=latency,
+                        open_ports=json.dumps(ports) if ports else None,
                         device_type=device_type, is_online=True,
                         last_seen=datetime.now(),
                     ))

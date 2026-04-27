@@ -20,11 +20,17 @@ AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Idempotent column migration for rtsp_url added after initial schema
-        try:
-            await conn.execute(text("ALTER TABLE cameras ADD COLUMN rtsp_url TEXT"))
-        except Exception:
-            pass
+        # Idempotent column migrations — wrapped individually so one failure doesn't block others
+        for stmt in (
+            "ALTER TABLE cameras ADD COLUMN rtsp_url TEXT",
+            "ALTER TABLE devices ADD COLUMN hostname TEXT",
+            "ALTER TABLE devices ADD COLUMN open_ports TEXT",
+            "ALTER TABLE devices ADD COLUMN response_time_ms REAL",
+        ):
+            try:
+                await conn.execute(text(stmt))
+            except Exception:
+                pass
 
 
 async def get_db() -> AsyncSession:

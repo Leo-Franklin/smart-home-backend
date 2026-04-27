@@ -16,9 +16,12 @@ class DeviceOut(BaseModel):
     id: int
     mac: str
     ip: str | None
+    hostname: str | None
     vendor: str | None
     device_type: str
     alias: str | None
+    open_ports: str | None      # JSON string: "[80,443]"
+    response_time_ms: float | None
     is_online: bool
     last_seen: datetime | None
     created_at: datetime
