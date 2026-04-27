@@ -24,12 +24,13 @@ async def list_devices(
     _: CurrentUser,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    device_type: str | None = Query(None, alias="type"),
+    device_types: list[str] = Query([], alias="device_type"),
     online: bool | None = None,
 ):
+    flat_types = [t for raw in device_types for t in raw.split(",") if t]
     q = select(Device)
-    if device_type:
-        q = q.where(Device.device_type == device_type)
+    if flat_types:
+        q = q.where(Device.device_type.in_(flat_types))
     if online is not None:
         q = q.where(Device.is_online == online)
 
@@ -96,6 +97,12 @@ async def _run_scan(scanner: Scanner):
     except Exception as e:
         logger.error(f"扫描失败: {e}")
         await ws_manager.broadcast("scan_completed", {"error": str(e)})
+
+
+@router.get("/types", response_model=list[str])
+async def list_device_types(db: DBDep, _: CurrentUser):
+    result = await db.execute(select(Device.device_type).distinct())
+    return result.scalars().all()
 
 
 @router.get("/{mac}", response_model=DeviceOut)
