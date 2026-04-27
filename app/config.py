@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # Network
-    network_range: str = "192.168.1.0/24"
+    network_range: str = "auto"
     scan_interval_seconds: int = 60
 
     # Camera
