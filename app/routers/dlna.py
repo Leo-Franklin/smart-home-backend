@@ -21,6 +21,9 @@ router = APIRouter(prefix="/dlna", tags=["dlna"])
 MEDIA_DIR = Path("data/dlna_media")
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
+MEDIA_TTL_SECONDS = 3600  # 1 hour
+
 
 def _local_ip() -> str:
     try:
@@ -107,21 +110,39 @@ async def cast_url(body: CastRequest, db: DBDep, _: CurrentUser):
 @router.post("/cast/file")
 async def cast_file(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: DBDep,
     _: CurrentUser,
     device_id: int = Form(...),
     file: UploadFile = File(...),
 ):
-    """Upload a local media file and push it to a DLNA device.
-
-    The backend serves the file over HTTP so the TV can pull it.
-    """
+    """Upload a local media file and push it to a DLNA device."""
     device = await _require_renderer(device_id, db)
 
     suffix = Path(file.filename or "media").suffix or ".mp4"
     fname = f"{int(time.time())}_{hashlib.md5((file.filename or 'media').encode()).hexdigest()[:8]}{suffix}"
     dest = MEDIA_DIR / fname
-    dest.write_bytes(await file.read())
+
+    written = 0
+    try:
+        with open(dest, "wb") as f:
+            while True:
+                chunk = await file.read(65536)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    dest.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB 限制",
+                    )
+                f.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"文件写入失败: {e}")
 
     port = request.url.port or 8000
     media_url = f"http://{_local_ip()}:{port}/dlna-media/{fname}"
@@ -134,12 +155,20 @@ async def cast_file(
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=502, detail=f"投屏失败: {e}")
 
+    background_tasks.add_task(_cleanup_media_file, dest, MEDIA_TTL_SECONDS)
+
     await ws_manager.broadcast("dlna_cast_started", {
         "device_id": device.id,
         "friendly_name": device.friendly_name,
         "media_url": media_url,
     })
     return {"message": "文件投屏成功", "media_url": media_url, "device": device.friendly_name}
+
+
+async def _cleanup_media_file(path: Path, delay_seconds: int):
+    await asyncio.sleep(delay_seconds)
+    path.unlink(missing_ok=True)
+    logger.info(f"DLNA 临时文件已清理: {path.name}")
 
 
 # ── Playback control ───────────────────────────────────────────────────────────
