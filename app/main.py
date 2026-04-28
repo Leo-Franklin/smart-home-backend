@@ -120,6 +120,44 @@ async def lifespan(app: FastAPI):
             logger.warning(f"启动清理: 重置 {len(stuck_recs)} 条孤立录制记录, {len(stuck_cams)} 台摄像头状态")
 
     scheduler_service.start()
+
+    # Restore enabled schedules from database
+    from app.models.schedule import Schedule as ScheduleModel
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(ScheduleModel).where(ScheduleModel.enabled == True)
+        )
+        enabled_schedules = result.scalars().all()
+
+    async def _trigger_scheduled_recording(camera_mac: str):
+        from sqlalchemy import select as _select
+        from app.models.camera import Camera as CameraModel
+        async with AsyncSessionLocal() as _db:
+            cam_result = await _db.execute(
+                _select(CameraModel).where(CameraModel.device_mac == camera_mac)
+            )
+            cam = cam_result.scalar_one_or_none()
+            if not cam or not cam.rtsp_url:
+                logger.warning(f"调度录制: 摄像头 {camera_mac} 不存在或无 RTSP URL")
+                return
+            if cam.is_recording:
+                logger.info(f"调度录制: {camera_mac} 已在录制中，跳过")
+                return
+        await recorder.start_recording(camera_mac=cam.device_mac, rtsp_url=cam.rtsp_url)
+
+    for sched in enabled_schedules:
+        try:
+            scheduler_service.add_recording_job(
+                job_id=f"schedule_{sched.id}",
+                cron_expr=sched.cron_expr,
+                camera_mac=sched.camera_mac,
+                callback=_trigger_scheduled_recording,
+            )
+        except Exception as e:
+            logger.warning(f"恢复调度任务 schedule_{sched.id} 失败: {e}")
+
+    logger.info(f"已从数据库恢复 {len(enabled_schedules)} 个调度任务")
+
     recorder.set_callbacks(on_complete=_on_recording_complete, on_failed=_on_recording_failed)
     await recorder.start_monitor()
     presence_service._poll_interval = settings.presence_poll_interval_seconds
