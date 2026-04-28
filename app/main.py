@@ -5,6 +5,7 @@ from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from sqlalchemy import select
 from app.config import get_settings
@@ -17,7 +18,7 @@ from app.services.nas_syncer import NasSyncer
 from app.services.ws_manager import ws_manager
 from app.services.presence_service import presence_service
 from app.routers import system, devices, cameras, recordings, schedules, ws
-from app.routers import members
+from app.routers import members, dlna
 
 settings = get_settings()
 
@@ -158,7 +159,13 @@ app.include_router(cameras.router, prefix=API_PREFIX)
 app.include_router(recordings.router, prefix=API_PREFIX)
 app.include_router(schedules.router, prefix=API_PREFIX)
 app.include_router(members.router, prefix=API_PREFIX)
+app.include_router(dlna.router, prefix=API_PREFIX)
 app.include_router(ws.router)
+
+# Serve uploaded DLNA media files so TVs can pull them over LAN
+from pathlib import Path as _Path
+_Path("data/dlna_media").mkdir(parents=True, exist_ok=True)
+app.mount("/dlna-media", StaticFiles(directory="data/dlna_media"), name="dlna-media")
 
 
 @app.exception_handler(Exception)
