@@ -3,6 +3,7 @@ import ipaddress
 import sys
 from datetime import datetime
 from urllib.parse import urlparse
+import httpx
 from loguru import logger
 from sqlalchemy import select
 from app.database import AsyncSessionLocal
@@ -31,13 +32,13 @@ def _validate_webhook_url(url: str) -> None:
         raise ValueError(f"Webhook URL 无效: {url}")
     try:
         addr = ipaddress.ip_address(hostname)
-        for net in _PRIVATE_NETWORKS:
-            if addr in net:
-                raise ValueError(f"Webhook URL 不能指向内网地址: {hostname}")
-    except ValueError as e:
-        if "内网" in str(e) or "https" in str(e) or "无效" in str(e):
-            raise
-        # hostname is a domain name, not an IP — allow it (DNS resolution not done here)
+    except ValueError:
+        # hostname is a domain name, not an IP literal — allow it
+        # Note: DNS rebinding attacks are a known limitation; IP literals only are checked here
+        return
+    for net in _PRIVATE_NETWORKS:
+        if addr in net:
+            raise ValueError(f"Webhook URL 不能指向内网地址: {hostname}")
 
 
 class PresenceService:
@@ -168,7 +169,6 @@ class PresenceService:
             logger.warning(f"Webhook URL 不合法，跳过: {e}")
             return
         try:
-            import httpx
             async with httpx.AsyncClient(timeout=5) as client:
                 await client.post(url, json={
                     "event": event,
