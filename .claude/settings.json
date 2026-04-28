@@ -1,0 +1,15 @@
+{
+  "enabledPlugins": {
+    "superpowers@obra-superpowers": true,
+    "superpowers@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "obra-superpowers": {
+      "source": {
+        "source": "github",
+        "repo": "obra/superpowers",
+        "path": ".claude-plugin"
+      }
+    }
+  }
+}
