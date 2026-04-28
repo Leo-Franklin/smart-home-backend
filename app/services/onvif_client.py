@@ -17,7 +17,7 @@ class OnvifClient:
         return self._camera
 
     async def get_device_info(self) -> dict:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._get_device_info_sync)
 
     def _get_device_info_sync(self) -> dict:
@@ -32,7 +32,7 @@ class OnvifClient:
         }
 
     async def get_stream_uri(self, profile_index: int = 0) -> str:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._get_stream_uri_sync, profile_index)
 
     def _get_stream_uri_sync(self, profile_index: int) -> str:
@@ -49,7 +49,7 @@ class OnvifClient:
         return uri.Uri
 
     async def get_snapshot_uri(self) -> str:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._get_snapshot_uri_sync)
 
     def _get_snapshot_uri_sync(self) -> str:
@@ -61,7 +61,7 @@ class OnvifClient:
         return uri.Uri
 
     async def get_profiles(self) -> list[dict]:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._get_profiles_sync)
 
     def _get_profiles_sync(self) -> list[dict]:
