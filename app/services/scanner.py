@@ -2,9 +2,15 @@ import asyncio
 import ipaddress
 import re
 import socket
+import struct
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
+
+# Dedicated executor for blocking I/O (hostname resolution + ping).
+# 128 workers = 64 semaphore × 2 concurrent blocking ops per device, no queuing.
+_IO_EXECUTOR = ThreadPoolExecutor(max_workers=128, thread_name_prefix="scanner_io")
 
 try:
     from scapy.all import ARP, Ether, srp
@@ -19,14 +25,55 @@ except ImportError:
     _MAC_LOOKUP_AVAILABLE = False
 
 
+def _detect_prefix_length(local_ip: str) -> int:
+    """Detect the real prefix length for the interface that holds local_ip."""
+    # Method 1: scapy routing table (already a dependency, most reliable)
+    if _SCAPY_AVAILABLE:
+        try:
+            from scapy.all import conf
+            # routes: (net_int, mask_int, gw, iface, src_ip, metric)
+            for entry in conf.route.routes:
+                net_int, mask_int, _gw, _iface, src, _metric = entry
+                if src == local_ip and mask_int not in (0xFFFFFFFF, 0x00000000):
+                    netmask_str = socket.inet_ntoa(struct.pack(">I", mask_int))
+                    return ipaddress.IPv4Network(f"0.0.0.0/{netmask_str}").prefixlen
+        except Exception:
+            pass
+
+    # Method 2: platform commands
+    try:
+        if sys.platform == "win32":
+            raw = subprocess.check_output(["ipconfig"], timeout=5)
+            out = raw.decode("gbk", errors="replace")
+            lines = out.splitlines()
+            for i, line in enumerate(lines):
+                if local_ip in line:
+                    # Subnet mask appears near the IP line
+                    for near in lines[max(0, i - 3): i + 4]:
+                        m = re.search(r"\b(255\.\d+\.\d+\.\d+)\b", near)
+                        if m:
+                            return ipaddress.IPv4Network(f"0.0.0.0/{m.group(1)}").prefixlen
+        else:
+            out = subprocess.check_output(["ip", "addr"], text=True, timeout=5)
+            for line in out.splitlines():
+                m = re.search(rf"\b{re.escape(local_ip)}/(\d+)\b", line)
+                if m:
+                    return int(m.group(1))
+    except Exception:
+        pass
+
+    return 24  # safe fallback
+
+
 def detect_local_network() -> str:
-    """Use the default-route interface IP to derive the /24 network."""
+    """Use the default-route interface IP and its actual subnet mask to derive the network."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
-        network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
-        logger.info(f"自动检测网段: {network} (本机 IP: {local_ip})")
+        prefix_len = _detect_prefix_length(local_ip)
+        network = ipaddress.ip_network(f"{local_ip}/{prefix_len}", strict=False)
+        logger.info(f"自动检测网段: {network} (本机 IP: {local_ip}, 掩码 /{prefix_len})")
         return str(network)
     except Exception as e:
         logger.warning(f"网段自动检测失败，回退到 192.168.1.0/24: {e}")
@@ -40,24 +87,32 @@ class Scanner:
 
     async def arp_scan(self) -> list[dict]:
         loop = asyncio.get_running_loop()
-        seen: dict[str, dict] = {}  # mac -> entry, dedup key
+        seen: dict[str, dict] = {}  # mac -> entry
 
-        # Primary path: ping-sweep to populate OS ARP cache, then read it.
-        # This works without Npcap or admin rights and is the most reliable on Windows.
         logger.info(f"开始网络扫描: {self.network}")
-        await loop.run_in_executor(None, self._ping_sweep_sync)
-        for d in await loop.run_in_executor(None, self._arp_table_scan_sync):
-            seen[d["mac"]] = d
-        logger.info(f"arp -a 发现 {len(seen)} 台设备")
 
-        # Supplementary: Scapy ARP broadcast catches devices that block ICMP ping.
         if _SCAPY_AVAILABLE:
+            # Primary path: ARP broadcast — O(3s) regardless of subnet size, no subprocess spam
             try:
                 for d in await loop.run_in_executor(None, self._arp_scan_sync):
-                    seen.setdefault(d["mac"], d)
-                logger.debug(f"Scapy 补充后共 {len(seen)} 台设备")
+                    seen[d["mac"]] = d
+                logger.info(f"Scapy ARP broadcast 发现 {len(seen)} 台设备")
             except Exception as e:
-                logger.debug(f"Scapy ARP 扫描失败（已有 arp -a 结果）: {e}")
+                logger.warning(f"Scapy ARP 失败，回退 ping sweep: {e}")
+
+        if not seen:
+            # Fallback: ping sweep to populate ARP cache, then read it
+            await loop.run_in_executor(None, self._ping_sweep_sync)
+
+        # Always supplement from OS ARP cache (catches hosts that replied to ping but not ARP broadcast)
+        for d in await loop.run_in_executor(None, self._arp_table_scan_sync):
+            seen.setdefault(d["mac"], d)
+        logger.debug(f"ARP 缓存补充后共 {len(seen)} 台设备")
+
+        # Local machine never appears in its own ARP table — add it explicitly
+        local_entry = await loop.run_in_executor(None, self._get_local_machine_entry)
+        if local_entry:
+            seen.setdefault(local_entry["mac"], local_entry)
 
         net = ipaddress.ip_network(self.network, strict=False)
         result = [d for d in seen.values() if ipaddress.ip_address(d["ip"]) in net]
@@ -66,26 +121,32 @@ class Scanner:
 
     def _arp_scan_sync(self) -> list[dict]:
         pkt = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=self.network)
-        answered, _ = srp(pkt, timeout=3, verbose=0)
+        answered, _ = srp(pkt, timeout=2, verbose=0)
         return [{"ip": rcv.psrc, "mac": rcv.hwsrc.upper()} for _, rcv in answered]
 
     def _ping_sweep_sync(self) -> None:
-        """Send parallel pings to all subnet hosts to populate the OS ARP cache."""
+        """Ping all subnet hosts to populate the OS ARP cache. Batched for large subnets."""
         net = ipaddress.ip_network(self.network, strict=False)
-        if net.num_addresses > 256:
+        hosts = list(net.hosts())
+        # Safety cap: skip subnets larger than /21 (>2046 hosts)
+        if len(hosts) > 2046:
+            logger.warning(f"网段 {net} 超过 2046 个主机，跳过 ping sweep")
             return
         if sys.platform == "win32":
-            # -n 1: one packet  -w 1000: 1s timeout
-            ping_args = lambda ip: ["ping", "-n", "1", "-w", "1000", str(ip)]
+            ping_args = lambda ip: ["ping", "-n", "1", "-w", "500", str(ip)]
         else:
-            # -c 1: one packet  -W 1: 1s timeout
             ping_args = lambda ip: ["ping", "-c", "1", "-W", "1", str(ip)]
-        procs = [
-            subprocess.Popen(ping_args(ip), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for ip in net.hosts()
-        ]
-        for p in procs:
-            p.wait()
+
+        # Batch into groups of 128 to avoid overwhelming the OS with too many processes
+        batch_size = 128
+        for i in range(0, len(hosts), batch_size):
+            batch = hosts[i: i + batch_size]
+            procs = [
+                subprocess.Popen(ping_args(ip), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for ip in batch
+            ]
+            for p in procs:
+                p.wait()
 
     def _arp_table_scan_sync(self) -> list[dict]:
         """Parse the OS ARP cache via `arp -a`."""
@@ -103,37 +164,89 @@ class Scanner:
             if not ip_match or not mac_match:
                 continue
             mac = mac_match.group(1).replace("-", ":").upper()
-            # Skip broadcast/multicast MACs
             if mac in ("FF:FF:FF:FF:FF:FF",) or mac.startswith("01:"):
                 continue
             results.append({"ip": ip_match.group(1), "mac": mac})
         return results
 
+    def _get_local_machine_entry(self) -> dict | None:
+        """Return this machine's own IP+MAC — it never appears in its own ARP table."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+            mac = self._get_local_mac(local_ip)
+            if mac:
+                return {"ip": local_ip, "mac": mac}
+        except Exception:
+            pass
+        return None
+
+    def _get_local_mac(self, local_ip: str) -> str | None:
+        """Get the MAC of the interface that holds local_ip."""
+        if _SCAPY_AVAILABLE:
+            try:
+                from scapy.all import conf, get_if_hwaddr
+                for iface_name, iface in conf.ifaces.items():
+                    if getattr(iface, "ip", None) == local_ip:
+                        mac = get_if_hwaddr(iface_name)
+                        if mac and mac != "00:00:00:00:00:00":
+                            return mac.upper()
+            except Exception:
+                pass
+
+        try:
+            if sys.platform == "win32":
+                # ipconfig /all pairs IP and MAC in the same interface block
+                raw = subprocess.check_output(["ipconfig", "/all"], timeout=5)
+                out = raw.decode("gbk", errors="replace")
+                blocks = re.split(r"\n(?=\S)", out)  # split on non-indented lines
+                for block in blocks:
+                    if local_ip in block:
+                        m = re.search(r"([0-9A-Fa-f]{2}[-][0-9A-Fa-f]{2}[-][0-9A-Fa-f]{2}[-][0-9A-Fa-f]{2}[-][0-9A-Fa-f]{2}[-][0-9A-Fa-f]{2})", block)
+                        if m:
+                            return m.group(1).replace("-", ":").upper()
+            else:
+                out = subprocess.check_output(["ip", "link"], text=True, timeout=5)
+                # Pair link/ether entries with interface names, then match via 'ip addr'
+                addr_out = subprocess.check_output(["ip", "addr"], text=True, timeout=5)
+                iface_match = re.search(rf"(\w+).*\n.*{re.escape(local_ip)}", addr_out)
+                if iface_match:
+                    iface = iface_match.group(1)
+                    mac_match = re.search(rf"{re.escape(iface)}.*\n.*link/ether\s+([0-9a-f:]+)", out)
+                    if mac_match:
+                        return mac_match.group(1).upper()
+        except Exception:
+            pass
+        return None
+
     async def resolve_hostname(self, ip: str) -> str | None:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._resolve_hostname_sync, ip)
+        return await asyncio.get_running_loop().run_in_executor(_IO_EXECUTOR, self._resolve_hostname_sync, ip)
 
     def _resolve_hostname_sync(self, ip: str) -> str | None:
         try:
-            hostname, _, _ = socket.gethostbyaddr(ip)
-            return hostname
+            old_timeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(1.0)
+            try:
+                hostname, _, _ = socket.gethostbyaddr(ip)
+                return hostname
+            finally:
+                socket.setdefaulttimeout(old_timeout)
         except Exception:
             return None
 
     async def measure_latency(self, ip: str) -> float | None:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._measure_latency_sync, ip)
+        return await asyncio.get_running_loop().run_in_executor(_IO_EXECUTOR, self._measure_latency_sync, ip)
 
     def _measure_latency_sync(self, ip: str) -> float | None:
         try:
             if sys.platform == "win32":
-                cmd = ["ping", "-n", "1", "-w", "1000", str(ip)]
-                # Matches "平均 = 12ms" (Simplified Chinese) or "Average = 12ms" (English)
+                cmd = ["ping", "-n", "1", "-w", "300", str(ip)]
                 pattern = r"(?:平均|Average)\s*[=<]\s*(\d+)\s*ms"
             else:
                 cmd = ["ping", "-c", "1", "-W", "1", str(ip)]
                 pattern = r"time=(\d+\.?\d*) ms"
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1)
             m = re.search(pattern, result.stdout, re.IGNORECASE)
             if m:
                 return float(m.group(1))
@@ -172,7 +285,7 @@ class Scanner:
         if 554 in open_ports or 2020 in open_ports:
             return "camera"
         v = vendor.lower()
-        if any(kw in v for kw in ("apple", "samsung", "xiaomi", "huawei", "oppo", "vivo")):
+        if any(kw in v for kw in ("apple", "samsung", "xiaomi", "huawei", "honor", "oppo", "vivo", "oneplus", "realme", "motorola", "nokia", "sony", )):
             return "phone"
         if any(kw in v for kw in ("intel", "realtek", "dell", "lenovo", "hp ", "asus")):
             return "computer"

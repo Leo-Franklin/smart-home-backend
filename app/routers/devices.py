@@ -54,45 +54,72 @@ async def list_devices(
 @router.post("/scan", status_code=status.HTTP_202_ACCEPTED, tags=["devices"])
 async def trigger_scan(background_tasks: BackgroundTasks, _: CurrentUser):
     settings = get_settings()
-    scanner = Scanner(settings.network_range)
-    background_tasks.add_task(_run_scan, scanner)
+    background_tasks.add_task(_run_scan, settings.network_range)
     return {"message": "扫描已启动，结果通过 WebSocket 推送"}
 
 
-async def _run_scan(scanner: Scanner):
+async def _enrich_device(scanner: Scanner, d: dict) -> dict:
+    """Concurrently resolve vendor/hostname/latency for one device."""
+    vendor, hostname, latency = await asyncio.gather(
+        scanner.lookup_vendor(d["mac"]),
+        scanner.resolve_hostname(d["ip"]),
+        scanner.measure_latency(d["ip"]),
+    )
+    return {
+        "mac": d["mac"], "ip": d["ip"],
+        "vendor": vendor or "Unknown",
+        "hostname": hostname,
+        "latency": latency,
+        # Infer type from vendor alone — avoids slow nmap during discovery
+        "device_type": scanner.guess_device_type(vendor or "", []),
+    }
+
+
+async def _run_scan(network_range: str):
+    loop = asyncio.get_running_loop()
+    scanner = await loop.run_in_executor(None, Scanner, network_range)
     await ws_manager.broadcast("scan_started", {})
     try:
         devices = await scanner.arp_scan()
         results = {"found": len(devices), "new": 0, "offline": 0}
 
+        # Enrich all devices concurrently (cap at 64, matched to _IO_EXECUTOR workers / 2)
+        sem = asyncio.Semaphore(64)
+
+        async def enrich_with_sem(d: dict) -> dict:
+            async with sem:
+                return await _enrich_device(scanner, d)
+
+        enriched = await asyncio.gather(*[enrich_with_sem(d) for d in devices])
+
         async with AsyncSessionLocal() as db:
-            for d in devices:
-                vendor, hostname, latency = await asyncio.gather(
-                    scanner.lookup_vendor(d["mac"]),
-                    scanner.resolve_hostname(d["ip"]),
-                    scanner.measure_latency(d["ip"]),
-                )
-                existing = (await db.execute(select(Device).where(Device.mac == d["mac"]))).scalar_one_or_none()
+            macs = [d["mac"] for d in enriched]
+            existing_rows = (await db.execute(
+                select(Device).where(Device.mac.in_(macs))
+            )).scalars().all()
+            existing_map = {d.mac: d for d in existing_rows}
+
+            now = datetime.now()
+            for data in enriched:
+                existing = existing_map.get(data["mac"])
                 if existing:
-                    existing.ip = d["ip"]
-                    existing.vendor = vendor
-                    existing.hostname = hostname
-                    existing.response_time_ms = latency
+                    existing.ip = data["ip"]
+                    existing.vendor = data["vendor"]
+                    existing.hostname = data["hostname"]
+                    existing.response_time_ms = data["latency"]
                     existing.is_online = True
-                    existing.last_seen = datetime.now()
+                    existing.last_seen = now
                 else:
                     results["new"] += 1
-                    ports = await scanner.probe_ports(d["ip"])
-                    device_type = scanner.guess_device_type(vendor, ports)
                     db.add(Device(
-                        mac=d["mac"], ip=d["ip"], vendor=vendor,
-                        hostname=hostname, response_time_ms=latency,
-                        open_ports=json.dumps(ports) if ports else None,
-                        device_type=device_type, is_online=True,
-                        last_seen=datetime.now(),
+                        mac=data["mac"], ip=data["ip"],
+                        vendor=data["vendor"], hostname=data["hostname"],
+                        response_time_ms=data["latency"],
+                        device_type=data["device_type"],
+                        is_online=True, last_seen=now,
                     ))
-
             await db.commit()
+
         await ws_manager.broadcast("scan_completed", results)
         logger.info(f"扫描完成: {results}")
     except Exception as e:
