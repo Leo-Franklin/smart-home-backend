@@ -83,6 +83,9 @@ async def stream_recording(recording_id: int, request: Request, db: DBDep, _: St
     file_path = Path(recording.file_path)
     settings = get_settings()
     storage_root = Path(settings.local_storage_path).resolve()
+    # Reject relative paths — they resolve relative to CWD which may differ from storage_root
+    if not file_path.is_absolute():
+        raise HTTPException(status_code=403, detail="文件路径不合法")
     try:
         resolved = file_path.resolve()
         if not resolved.is_relative_to(storage_root):
@@ -100,10 +103,16 @@ async def stream_recording(recording_id: int, request: Request, db: DBDep, _: St
 
     if range_header:
         try:
-            range_spec = range_header.replace("bytes=", "")
+            range_spec = range_header[len("bytes="):]  # safer strip than .replace()
             parts = range_spec.split("-", 1)
-            start = int(parts[0])
-            end = int(parts[1]) if parts[1] else file_size - 1
+            if parts[0] == "":
+                # Suffix range: bytes=-N means last N bytes
+                suffix_len = int(parts[1])
+                start = max(0, file_size - suffix_len)
+                end = file_size - 1
+            else:
+                start = int(parts[0])
+                end = int(parts[1]) if parts[1] else file_size - 1
         except (ValueError, IndexError):
             raise HTTPException(status_code=400, detail="Range 头格式错误")
 
@@ -111,7 +120,7 @@ async def stream_recording(recording_id: int, request: Request, db: DBDep, _: St
             raise HTTPException(
                 status_code=416,
                 detail="Range 超出文件范围",
-                headers={"Content-Range": f"bytes */{file_size}"},
+                headers={"Content-Range": f"bytes */{file_size}", "Accept-Ranges": "bytes"},
             )
         content_length = end - start + 1
 
