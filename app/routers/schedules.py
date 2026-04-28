@@ -9,13 +9,14 @@ from loguru import logger
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
 
-async def _make_recording_callback(request: Request):
+def _make_recording_callback(request: Request):
     recorder = request.app.state.recorder
 
     async def _trigger(camera_mac: str):
         from sqlalchemy import select as _select
         from app.database import AsyncSessionLocal
         from app.models.camera import Camera as CameraModel
+        rtsp_url = None
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 _select(CameraModel).where(CameraModel.device_mac == camera_mac)
@@ -27,7 +28,9 @@ async def _make_recording_callback(request: Request):
             if cam.is_recording:
                 logger.info(f"调度录制: {camera_mac} 已在录制中，跳过")
                 return
-        await recorder.start_recording(camera_mac=cam.device_mac, rtsp_url=cam.rtsp_url)
+            rtsp_url = cam.rtsp_url  # capture value inside session
+        if rtsp_url:
+            await recorder.start_recording(camera_mac=camera_mac, rtsp_url=rtsp_url)
 
     return _trigger
 
@@ -48,14 +51,17 @@ async def create_schedule(body: ScheduleCreate, request: Request, db: DBDep, _: 
     await db.commit()
     await db.refresh(schedule)
     if schedule.enabled:
-        callback = await _make_recording_callback(request)
-        scheduler_service.add_recording_job(
-            job_id=f"schedule_{schedule.id}",
-            cron_expr=schedule.cron_expr,
-            camera_mac=schedule.camera_mac,
-            callback=callback,
-        )
-        logger.info(f"已注册调度任务: schedule_{schedule.id} ({schedule.cron_expr})")
+        callback = _make_recording_callback(request)
+        try:
+            scheduler_service.add_recording_job(
+                job_id=f"schedule_{schedule.id}",
+                cron_expr=schedule.cron_expr,
+                camera_mac=schedule.camera_mac,
+                callback=callback,
+            )
+            logger.info(f"已注册调度任务: schedule_{schedule.id} ({schedule.cron_expr})")
+        except Exception as e:
+            logger.error(f"APScheduler 注册失败 schedule_{schedule.id}: {e}")
     return schedule
 
 
@@ -83,14 +89,17 @@ async def update_schedule(schedule_id: int, body: ScheduleUpdate, request: Reque
 
     job_id = f"schedule_{schedule.id}"
     if schedule.enabled:
-        callback = await _make_recording_callback(request)
-        scheduler_service.add_recording_job(
-            job_id=job_id,
-            cron_expr=schedule.cron_expr,
-            camera_mac=schedule.camera_mac,
-            callback=callback,
-        )
-        logger.info(f"已更新调度任务: {job_id} ({schedule.cron_expr})")
+        callback = _make_recording_callback(request)
+        try:
+            scheduler_service.add_recording_job(
+                job_id=job_id,
+                cron_expr=schedule.cron_expr,
+                camera_mac=schedule.camera_mac,
+                callback=callback,
+            )
+            logger.info(f"已更新调度任务: {job_id} ({schedule.cron_expr})")
+        except Exception as e:
+            logger.error(f"APScheduler 注册失败 {job_id}: {e}")
     else:
         scheduler_service.remove_job(job_id)
         logger.info(f"已禁用调度任务: {job_id}")

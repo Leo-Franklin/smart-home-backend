@@ -127,11 +127,15 @@ async def lifespan(app: FastAPI):
         result = await db.execute(
             select(ScheduleModel).where(ScheduleModel.enabled == True)
         )
-        enabled_schedules = result.scalars().all()
+        enabled_schedules = [
+            {"id": s.id, "cron_expr": s.cron_expr, "camera_mac": s.camera_mac}
+            for s in result.scalars().all()
+        ]
 
     async def _trigger_scheduled_recording(camera_mac: str):
         from sqlalchemy import select as _select
         from app.models.camera import Camera as CameraModel
+        rtsp_url = None
         async with AsyncSessionLocal() as _db:
             cam_result = await _db.execute(
                 _select(CameraModel).where(CameraModel.device_mac == camera_mac)
@@ -143,18 +147,20 @@ async def lifespan(app: FastAPI):
             if cam.is_recording:
                 logger.info(f"调度录制: {camera_mac} 已在录制中，跳过")
                 return
-        await recorder.start_recording(camera_mac=cam.device_mac, rtsp_url=cam.rtsp_url)
+            rtsp_url = cam.rtsp_url  # capture value inside session
+        if rtsp_url:
+            await recorder.start_recording(camera_mac=camera_mac, rtsp_url=rtsp_url)
 
     for sched in enabled_schedules:
         try:
             scheduler_service.add_recording_job(
-                job_id=f"schedule_{sched.id}",
-                cron_expr=sched.cron_expr,
-                camera_mac=sched.camera_mac,
+                job_id=f"schedule_{sched['id']}",
+                cron_expr=sched['cron_expr'],
+                camera_mac=sched['camera_mac'],
                 callback=_trigger_scheduled_recording,
             )
         except Exception as e:
-            logger.warning(f"恢复调度任务 schedule_{sched.id} 失败: {e}")
+            logger.warning(f"恢复调度任务 schedule_{sched['id']} 失败: {e}")
 
     logger.info(f"已从数据库恢复 {len(enabled_schedules)} 个调度任务")
 
