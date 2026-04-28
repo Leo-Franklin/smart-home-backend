@@ -21,6 +21,8 @@ router = APIRouter(prefix="/dlna", tags=["dlna"])
 MEDIA_DIR = Path("data/dlna_media")
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
+ALLOWED_MEDIA_SUFFIXES = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".mp3", ".m4a", ".flac", ".wav", ".m3u8"}
+
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 MEDIA_TTL_SECONDS = 3600  # 1 hour
 
@@ -119,7 +121,12 @@ async def cast_file(
     """Upload a local media file and push it to a DLNA device."""
     device = await _require_renderer(device_id, db)
 
-    suffix = Path(file.filename or "media").suffix or ".mp4"
+    suffix = Path(file.filename or "media").suffix.lower() or ".mp4"
+    if suffix not in ALLOWED_MEDIA_SUFFIXES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"不支持的文件格式: {suffix}，允许格式: {', '.join(sorted(ALLOWED_MEDIA_SUFFIXES))}",
+        )
     fname = f"{int(time.time())}_{hashlib.md5((file.filename or 'media').encode()).hexdigest()[:8]}{suffix}"
     dest = MEDIA_DIR / fname
 
