@@ -1,5 +1,12 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 from functools import lru_cache
+
+_INSECURE_JWT_DEFAULTS = {
+    "change_me_to_a_random_string_at_least_32_chars",
+    "",
+}
+_INSECURE_PASSWORD_DEFAULTS = {"change_me", ""}
 
 
 class Settings(BaseSettings):
@@ -35,11 +42,38 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     debug: bool = False
 
+    # CORS — separate from debug flag so security policy isn't coupled to debug mode
+    # Multiple origins: comma-separated, e.g. "http://localhost:5173,https://app.example.com"
+    cors_allow_origins: str = "http://localhost:5173"
+
     # Database
     database_url: str = "sqlite+aiosqlite:///./data/smart_home.db"
 
     # App meta
     app_version: str = "1.0.0"
+
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def jwt_secret_must_be_changed(cls, v: str) -> str:
+        if v in _INSECURE_JWT_DEFAULTS or len(v) < 32:
+            raise ValueError(
+                "JWT_SECRET_KEY 必须设置为至少 32 字符的随机字符串，"
+                "请在 .env 中配置 JWT_SECRET_KEY"
+            )
+        return v
+
+    @field_validator("admin_password")
+    @classmethod
+    def admin_password_must_be_changed(cls, v: str) -> str:
+        if v in _INSECURE_PASSWORD_DEFAULTS:
+            raise ValueError(
+                "ADMIN_PASSWORD 不能使用默认值，"
+                "请在 .env 中配置强密码"
+            )
+        return v
+
+    def get_cors_origins(self) -> list[str]:
+        return [o.strip() for o in self.cors_allow_origins.split(",") if o.strip()]
 
 
 @lru_cache
