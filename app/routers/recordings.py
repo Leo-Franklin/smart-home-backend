@@ -81,6 +81,15 @@ async def stream_recording(recording_id: int, request: Request, db: DBDep, _: St
         raise HTTPException(status_code=409, detail="录像尚未完成，无法播放")
 
     file_path = Path(recording.file_path)
+    settings = get_settings()
+    storage_root = Path(settings.local_storage_path).resolve()
+    try:
+        resolved = file_path.resolve()
+        if not resolved.is_relative_to(storage_root):
+            raise HTTPException(status_code=403, detail="文件路径不合法")
+    except ValueError:
+        raise HTTPException(status_code=403, detail="文件路径不合法")
+
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="文件不存在")
 
@@ -90,10 +99,20 @@ async def stream_recording(recording_id: int, request: Request, db: DBDep, _: St
     range_header = request.headers.get("range")
 
     if range_header:
-        range_spec = range_header.replace("bytes=", "")
-        parts = range_spec.split("-")
-        start = int(parts[0])
-        end = int(parts[1]) if parts[1] else file_size - 1
+        try:
+            range_spec = range_header.replace("bytes=", "")
+            parts = range_spec.split("-", 1)
+            start = int(parts[0])
+            end = int(parts[1]) if parts[1] else file_size - 1
+        except (ValueError, IndexError):
+            raise HTTPException(status_code=400, detail="Range 头格式错误")
+
+        if start < 0 or end >= file_size or start > end:
+            raise HTTPException(
+                status_code=416,
+                detail="Range 超出文件范围",
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
         content_length = end - start + 1
 
         def iter_range():
