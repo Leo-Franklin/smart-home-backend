@@ -15,7 +15,9 @@ from app.services.scheduler_service import scheduler_service
 from app.services.recorder import Recorder, RecordingTask
 from app.services.nas_syncer import NasSyncer
 from app.services.ws_manager import ws_manager
+from app.services.presence_service import presence_service
 from app.routers import system, devices, cameras, recordings, schedules, ws
+from app.routers import members
 
 settings = get_settings()
 
@@ -119,10 +121,14 @@ async def lifespan(app: FastAPI):
     scheduler_service.start()
     recorder.set_callbacks(on_complete=_on_recording_complete, on_failed=_on_recording_failed)
     await recorder.start_monitor()
+    presence_service._poll_interval = settings.presence_poll_interval_seconds
+    await presence_service.start()
     app.state.recorder = recorder
     app.state.nas_syncer = nas_syncer
+    app.state.presence_service = presence_service
     yield
     await recorder.stop_monitor()
+    await presence_service.stop()
     scheduler_service.shutdown()
     logger.info("智能家居后端已停止")
 
@@ -151,6 +157,7 @@ app.include_router(devices.router, prefix=API_PREFIX)
 app.include_router(cameras.router, prefix=API_PREFIX)
 app.include_router(recordings.router, prefix=API_PREFIX)
 app.include_router(schedules.router, prefix=API_PREFIX)
+app.include_router(members.router, prefix=API_PREFIX)
 app.include_router(ws.router)
 
 

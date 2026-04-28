@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from app.deps import DBDep, CurrentUser
 from app.database import AsyncSessionLocal
 from app.models.device import Device
+from app.models.member import Member, MemberDevice
 from app.schemas.device import DeviceOut, DeviceUpdate
 from app.schemas import PagedResponse
 from app.services.scanner import Scanner
@@ -103,6 +104,42 @@ async def _run_scan(scanner: Scanner):
 async def list_device_types(db: DBDep, _: CurrentUser):
     result = await db.execute(select(Device.device_type).distinct())
     return result.scalars().all()
+
+
+@router.get("/topology")
+async def get_topology(db: DBDep, _: CurrentUser):
+    devices_result = await db.execute(select(Device))
+    devices = devices_result.scalars().all()
+
+    bindings_result = await db.execute(
+        select(MemberDevice, Member).join(Member, Member.id == MemberDevice.member_id)
+    )
+    mac_owners: dict[str, list] = {}
+    for md, member in bindings_result.all():
+        mac_owners.setdefault(md.mac, []).append({
+            "id": member.id,
+            "name": member.name,
+            "avatar_url": member.avatar_url,
+            "is_home": member.is_home,
+        })
+
+    return {
+        "nodes": [
+            {
+                "mac": d.mac,
+                "ip": d.ip,
+                "hostname": d.hostname,
+                "vendor": d.vendor,
+                "device_type": d.device_type or "unknown",
+                "alias": d.alias,
+                "response_time_ms": d.response_time_ms,
+                "is_online": d.is_online,
+                "last_seen": d.last_seen.isoformat() if d.last_seen else None,
+                "owners": mac_owners.get(d.mac, []),
+            }
+            for d in devices
+        ]
+    }
 
 
 @router.get("/{mac}", response_model=DeviceOut)

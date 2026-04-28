@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     # Network
     network_range: str = "auto"
     scan_interval_seconds: int = 60
+    presence_poll_interval_seconds: int = 30
 
     # Camera
     camera_onvif_user: str = "admin"
