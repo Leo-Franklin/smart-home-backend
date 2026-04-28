@@ -70,6 +70,8 @@ class Settings(BaseSettings):
                 "ADMIN_PASSWORD 不能使用默认值，"
                 "请在 .env 中配置强密码"
             )
+        if len(v) < 8:
+            raise ValueError("ADMIN_PASSWORD 至少需要 8 个字符")
         return v
 
     def get_cors_origins(self) -> list[str]:
