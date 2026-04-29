@@ -19,7 +19,7 @@ AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 async def init_db() -> None:
     # Import all models so create_all picks them up
-    from app.models import camera, recording, device, member, dlna_device  # noqa: F401
+    from app.models import camera, recording, device, member, dlna_device, device_online_log  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
