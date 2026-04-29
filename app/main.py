@@ -19,6 +19,7 @@ from app.services.ws_manager import ws_manager
 from app.services.presence_service import presence_service
 from app.routers import system, devices, cameras, recordings, schedules, ws
 from app.routers import members, dlna
+from app.services.camera_health import CameraHealthChecker
 
 settings = get_settings()
 
@@ -164,14 +165,18 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"已从数据库恢复 {len(enabled_schedules)} 个调度任务")
 
+    camera_health_checker = CameraHealthChecker(settings.camera_health_interval_seconds)
     recorder.set_callbacks(on_complete=_on_recording_complete, on_failed=_on_recording_failed)
     await recorder.start_monitor()
     presence_service._poll_interval = settings.presence_poll_interval_seconds
     await presence_service.start()
+    await camera_health_checker.start()
+    app.state.camera_health_checker = camera_health_checker
     app.state.recorder = recorder
     app.state.nas_syncer = nas_syncer
     app.state.presence_service = presence_service
     yield
+    await camera_health_checker.stop()
     await recorder.stop_monitor()
     await presence_service.stop()
     scheduler_service.shutdown()

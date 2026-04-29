@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     network_range: str = "auto"
     scan_interval_seconds: int = 60
     presence_poll_interval_seconds: int = 30
+    camera_health_interval_seconds: int = 60   # A3: camera probe interval
+    server_port: int = 8000                    # A4: for constructing DLNA media URLs
 
     # Camera
     camera_onvif_user: str = "admin"
