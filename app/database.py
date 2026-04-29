@@ -29,6 +29,10 @@ async def init_db() -> None:
             "ALTER TABLE devices ADD COLUMN hostname TEXT",
             "ALTER TABLE devices ADD COLUMN open_ports TEXT",
             "ALTER TABLE devices ADD COLUMN response_time_ms REAL",
+            "ALTER TABLE members ADD COLUMN auto_record_cameras JSON DEFAULT '[]'",
+            "ALTER TABLE cameras ADD COLUMN is_online BOOLEAN DEFAULT 1",
+            "ALTER TABLE cameras ADD COLUMN last_probe_at DATETIME",
+            "ALTER TABLE cameras ADD COLUMN auto_cast_dlna VARCHAR(256)",
         ):
             try:
                 await conn.execute(text(stmt))

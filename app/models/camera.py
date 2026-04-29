@@ -19,4 +19,7 @@ class Camera(Base):
     rtsp_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     stream_profile: Mapped[str] = mapped_column(String(32), default="mainStream")
     is_recording: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_online: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_probe_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    auto_cast_dlna: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

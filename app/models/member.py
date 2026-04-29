@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, Text, ForeignKey, func
+from sqlalchemy import String, Boolean, DateTime, Text, ForeignKey, func, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -15,6 +15,7 @@ class Member(Base):
     last_arrived_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_left_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    auto_record_cameras: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
 
     devices: Mapped[list["MemberDevice"]] = relationship(
         "MemberDevice", back_populates="member", cascade="all, delete-orphan"
