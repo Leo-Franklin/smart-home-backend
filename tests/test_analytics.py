@@ -274,3 +274,93 @@ async def test_log_scan_result_upserts_on_second_scan(mem_db):
     assert len(rows) == 1           # still one row — upserted, not inserted twice
     assert rows[0].online_count == 2
     assert rows[0].scan_count == 2
+
+
+@pytest_asyncio.fixture
+async def history_client(mem_db, monkeypatch):
+    """Client with DeviceOnlineLog rows pre-seeded for history-dependent endpoints."""
+    monkeypatch.setenv("JWT_SECRET_KEY", _JWT_KEY)
+    monkeypatch.setenv("ADMIN_PASSWORD", _ADMIN_PW)
+
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    from app.models.device import Device
+    from app.models.device_online_log import DeviceOnlineLog
+
+    async with mem_db() as db:
+        db.add_all([
+            Device(mac="AA:BB:CC:DD:EE:01", device_type="camera", alias="Cam1", is_online=True),
+            Device(mac="AA:BB:CC:DD:EE:02", device_type="phone", hostname="ph1", is_online=True),
+        ])
+        await db.commit()
+
+        # Seed 3 hours worth of log entries (within last 7 days)
+        from datetime import timedelta
+        now = datetime.now()
+        for h in range(3):
+            bucket = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=h)
+            db.add_all([
+                DeviceOnlineLog(mac="AA:BB:CC:DD:EE:01", bucket_hour=bucket,
+                                device_type="camera", online_count=3, scan_count=4),
+                DeviceOnlineLog(mac="AA:BB:CC:DD:EE:02", bucket_hour=bucket,
+                                device_type="phone", online_count=2, scan_count=4),
+            ])
+        await db.commit()
+
+    from app.database import get_db
+    from app.main import app as fastapi_app
+
+    async def override_get_db():
+        async with mem_db() as session:
+            yield session
+
+    fastapi_app.dependency_overrides[get_db] = override_get_db
+
+    from app.auth import create_access_token
+    token = create_access_token("admin", _JWT_KEY)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=fastapi_app), base_url="http://test"
+    ) as c:
+        c.headers.update(headers)
+        yield c
+
+    fastapi_app.dependency_overrides.pop(get_db, None)
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_online_trend(history_client):
+    resp = await history_client.get("/api/v1/analytics/online-trend?range=7d")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert len(data) >= 1
+    assert all("timestamp" in row and "count" in row for row in data)
+    assert all(isinstance(row["count"], int) for row in data)
+
+
+@pytest.mark.asyncio
+async def test_device_stability(history_client):
+    resp = await history_client.get("/api/v1/analytics/device-stability?range=7d")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert len(data) == 2
+    macs = {row["mac"] for row in data}
+    assert "AA:BB:CC:DD:EE:01" in macs
+    cam_row = next(r for r in data if r["mac"] == "AA:BB:CC:DD:EE:01")
+    # 3 online out of 4 scans each hour = 75%
+    assert cam_row["uptime_pct"] == 75.0
+    assert cam_row["name"] == "Cam1"
+
+
+@pytest.mark.asyncio
+async def test_type_activity(history_client):
+    resp = await history_client.get("/api/v1/analytics/type-activity?range=7d")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert len(data) == 24   # one entry per hour of day (0–23)
+    assert all("hour" in row for row in data)
+    hours = [row["hour"] for row in data]
+    assert hours == list(range(24))
