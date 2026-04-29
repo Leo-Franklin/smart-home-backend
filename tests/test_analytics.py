@@ -196,3 +196,81 @@ async def test_new_devices(seeded_client):
     data = resp.json()["data"]
     assert len(data) >= 1
     assert all("period" in row and "count" in row for row in data)
+
+
+@pytest.mark.asyncio
+async def test_log_scan_result_online_device(mem_db):
+    from app.models.device import Device
+    from app.models.device_online_log import DeviceOnlineLog
+    from app.routers.devices import _log_scan_result
+
+    bucket = datetime(2024, 1, 15, 14, 0, 0)
+
+    async with mem_db() as db:
+        db.add(Device(mac="AA:BB:CC:DD:EE:FF", device_type="camera", is_online=True))
+        await db.commit()
+
+    async with mem_db() as db:
+        await _log_scan_result(db, [{"mac": "AA:BB:CC:DD:EE:FF"}], bucket)
+
+    async with mem_db() as db:
+        result = await db.execute(select(DeviceOnlineLog))
+        rows = result.scalars().all()
+
+    assert len(rows) == 1
+    assert rows[0].mac == "AA:BB:CC:DD:EE:FF"
+    assert rows[0].online_count == 1
+    assert rows[0].scan_count == 1
+
+
+@pytest.mark.asyncio
+async def test_log_scan_result_offline_device(mem_db):
+    from app.models.device import Device
+    from app.models.device_online_log import DeviceOnlineLog
+    from app.routers.devices import _log_scan_result
+
+    bucket = datetime(2024, 1, 15, 14, 0, 0)
+
+    async with mem_db() as db:
+        db.add(Device(mac="BB:BB:CC:DD:EE:FF", device_type="phone", is_online=False))
+        await db.commit()
+
+    # Scan found nothing — enriched list is empty
+    async with mem_db() as db:
+        await _log_scan_result(db, [], bucket)
+
+    async with mem_db() as db:
+        result = await db.execute(select(DeviceOnlineLog))
+        rows = result.scalars().all()
+
+    assert len(rows) == 1
+    assert rows[0].online_count == 0   # was not found in scan
+    assert rows[0].scan_count == 1
+
+
+@pytest.mark.asyncio
+async def test_log_scan_result_upserts_on_second_scan(mem_db):
+    from app.models.device import Device
+    from app.models.device_online_log import DeviceOnlineLog
+    from app.routers.devices import _log_scan_result
+
+    bucket = datetime(2024, 1, 15, 14, 0, 0)
+    enriched = [{"mac": "CC:CC:CC:DD:EE:FF"}]
+
+    async with mem_db() as db:
+        db.add(Device(mac="CC:CC:CC:DD:EE:FF", device_type="iot", is_online=True))
+        await db.commit()
+
+    # Two scans in the same hour bucket
+    async with mem_db() as db:
+        await _log_scan_result(db, enriched, bucket)
+    async with mem_db() as db:
+        await _log_scan_result(db, enriched, bucket)
+
+    async with mem_db() as db:
+        result = await db.execute(select(DeviceOnlineLog))
+        rows = result.scalars().all()
+
+    assert len(rows) == 1           # still one row — upserted, not inserted twice
+    assert rows[0].online_count == 2
+    assert rows[0].scan_count == 2

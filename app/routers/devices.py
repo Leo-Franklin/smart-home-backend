@@ -4,10 +4,13 @@ import math
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, status, BackgroundTasks, Query
 from sqlalchemy import select, func
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.deps import DBDep, CurrentUser
 from app.database import AsyncSessionLocal
 from app.models.device import Device
+from app.models.device_online_log import DeviceOnlineLog
 from app.models.member import Member, MemberDevice
 from app.schemas.device import DeviceOut, DeviceUpdate
 from app.schemas import PagedResponse
@@ -104,6 +107,42 @@ def _find_unknown_devices(
     return result
 
 
+async def _log_scan_result(
+    db: AsyncSession,
+    enriched: list[dict],
+    bucket_hour: datetime,
+) -> None:
+    """Upsert per-device presence into DeviceOnlineLog for the given hour bucket."""
+    online_macs = {d["mac"] for d in enriched}
+
+    all_result = await db.execute(select(Device.mac, Device.device_type))
+    all_devices = all_result.all()
+    if not all_devices:
+        return
+
+    rows = [
+        {
+            "mac": d.mac,
+            "bucket_hour": bucket_hour,
+            "device_type": d.device_type or "unknown",
+            "online_count": 1 if d.mac in online_macs else 0,
+            "scan_count": 1,
+        }
+        for d in all_devices
+    ]
+
+    stmt = sqlite_insert(DeviceOnlineLog).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["mac", "bucket_hour"],
+        set_={
+            "online_count": DeviceOnlineLog.online_count + stmt.excluded.online_count,
+            "scan_count": DeviceOnlineLog.scan_count + 1,
+        },
+    )
+    await db.execute(stmt)
+    await db.commit()
+
+
 async def _run_scan(network_range: str):
     loop = asyncio.get_running_loop()
     scanner = await loop.run_in_executor(None, Scanner, network_range)
@@ -170,6 +209,13 @@ async def _run_scan(network_range: str):
                     logger.info(f"[A2] 发现 {len(unknowns)} 台陌生设备")
             except Exception as e:
                 logger.warning(f"[A2] 陌生设备检测失败，不影响扫描结果: {e}")
+
+            # Analytics: log hourly device presence
+            try:
+                bucket_hour = now.replace(minute=0, second=0, microsecond=0)
+                await _log_scan_result(db, enriched, bucket_hour)
+            except Exception as e:
+                logger.warning(f"[Analytics] 设备在线日志写入失败，不影响扫描结果: {e}")
 
         await ws_manager.broadcast("scan_completed", results)
         logger.info(f"扫描完成: {results}")
