@@ -77,23 +77,27 @@ async def _enrich_device(scanner: Scanner, d: dict) -> dict:
 
 def _find_unknown_devices(
     enriched: list[dict],
-    existing_map: dict,
+    original_last_seen: dict[str, "datetime | None"],
     bound_macs: set[str],
     now: datetime,
     staleness_hours: int = 24,
 ) -> list[dict]:
-    """Return devices not bound to any member that are new or stale (not seen recently)."""
+    """Return devices not bound to any member that are new or stale (not seen recently).
+
+    original_last_seen: snapshot of last_seen values taken BEFORE the DB update loop,
+    keyed by MAC. MACs absent from this dict are newly discovered devices.
+    """
     result = []
     for data in enriched:
         mac = data["mac"]
         if mac in bound_macs:
             continue
-        existing = existing_map.get(mac)
-        is_new = existing is None
+        is_new = mac not in original_last_seen
+        last_seen = original_last_seen.get(mac)
         is_stale = (
-            existing is not None
-            and existing.last_seen is not None
-            and (now - existing.last_seen).total_seconds() > staleness_hours * 3600
+            not is_new
+            and last_seen is not None
+            and (now - last_seen).total_seconds() > staleness_hours * 3600
         )
         if is_new or is_stale:
             result.append(data)
@@ -123,6 +127,10 @@ async def _run_scan(network_range: str):
                 select(Device).where(Device.mac.in_(macs))
             )).scalars().all()
             existing_map = {d.mac: d for d in existing_rows}
+            # Snapshot last_seen before the update loop so stale detection sees original values
+            original_last_seen: dict[str, datetime | None] = {
+                mac: dev.last_seen for mac, dev in existing_map.items()
+            }
 
             now = datetime.now()
             for data in enriched:
@@ -146,19 +154,22 @@ async def _run_scan(network_range: str):
             await db.commit()
 
             # A2: unknown device detection
-            bound_result = await db.execute(select(MemberDevice.mac))
-            bound_macs = {row[0] for row in bound_result.all()}
-            unknowns = _find_unknown_devices(enriched, existing_map, bound_macs, now)
-            for u in unknowns:
-                await ws_manager.broadcast("unknown_device_detected", {
-                    "mac": u["mac"],
-                    "ip": u["ip"],
-                    "vendor": u.get("vendor"),
-                    "hostname": u.get("hostname"),
-                    "first_seen": now.isoformat(),
-                })
-            if unknowns:
-                logger.info(f"[A2] 发现 {len(unknowns)} 台陌生设备")
+            try:
+                bound_result = await db.execute(select(MemberDevice.mac))
+                bound_macs = {row[0] for row in bound_result.all()}
+                unknowns = _find_unknown_devices(enriched, original_last_seen, bound_macs, now)
+                for u in unknowns:
+                    await ws_manager.broadcast("unknown_device_detected", {
+                        "mac": u["mac"],
+                        "ip": u["ip"],
+                        "vendor": u.get("vendor"),
+                        "hostname": u.get("hostname"),
+                        "first_seen": now.isoformat(),
+                    })
+                if unknowns:
+                    logger.info(f"[A2] 发现 {len(unknowns)} 台陌生设备")
+            except Exception as e:
+                logger.warning(f"[A2] 陌生设备检测失败，不影响扫描结果: {e}")
 
         await ws_manager.broadcast("scan_completed", results)
         logger.info(f"扫描完成: {results}")
