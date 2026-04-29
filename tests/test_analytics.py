@@ -49,9 +49,6 @@ async def test_device_online_log_insert(mem_db):
     assert rows[0].bucket_hour == datetime(2024, 1, 15, 14, 0, 0)
     assert rows[0].online_count == 3
     assert rows[0].scan_count == 5
-
-
-import os
 from httpx import AsyncClient, ASGITransport
 
 
@@ -194,7 +191,7 @@ async def test_recording_calendar(seeded_client):
 
 @pytest.mark.asyncio
 async def test_new_devices(seeded_client):
-    resp = await seeded_client.get("/api/v1/analytics/new-devices?range=90d&group_by=week")
+    resp = await seeded_client.get("/api/v1/analytics/new-devices?range=90d")
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert len(data) >= 1
