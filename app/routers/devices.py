@@ -136,7 +136,7 @@ async def _log_scan_result(
         index_elements=["mac", "bucket_hour"],
         set_={
             "online_count": DeviceOnlineLog.online_count + stmt.excluded.online_count,
-            "scan_count": DeviceOnlineLog.scan_count + 1,
+            "scan_count": DeviceOnlineLog.scan_count + stmt.excluded.scan_count,
         },
     )
     await db.execute(stmt)

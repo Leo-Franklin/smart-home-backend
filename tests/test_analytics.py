@@ -339,6 +339,10 @@ async def test_online_trend(history_client):
     assert len(data) >= 1
     assert all("timestamp" in row and "count" in row for row in data)
     assert all(isinstance(row["count"], int) for row in data)
+    # 2 online devices per hour × 3 hours → daily avg = 2
+    today_row = next((r for r in data if r["count"] > 0), None)
+    assert today_row is not None
+    assert today_row["count"] == 2
 
 
 @pytest.mark.asyncio
