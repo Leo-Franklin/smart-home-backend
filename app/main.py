@@ -176,6 +176,7 @@ async def lifespan(app: FastAPI):
             )).scalar_one_or_none()
             if not cam or not cam.rtsp_url or cam.is_recording:
                 return
+            rtsp_url = cam.rtsp_url  # capture before session closes
             rec = RecordingModel(
                 camera_mac=camera_mac,
                 file_path="(pending)",
@@ -189,7 +190,7 @@ async def lifespan(app: FastAPI):
             rec_id = rec.id
 
         try:
-            await recorder.start_recording(camera_mac, cam.rtsp_url, settings.recording_segment_seconds)
+            await recorder.start_recording(camera_mac, rtsp_url, settings.recording_segment_seconds)
         except Exception as e:
             logger.error(f"[A1] 自动录制启动失败 {camera_mac}: {e}")
             async with AsyncSessionLocal() as db:
@@ -209,6 +210,8 @@ async def lifespan(app: FastAPI):
 
         if camera_mac in recorder.active:
             recorder.active[camera_mac].recording_id = rec_id
+        else:
+            logger.warning(f"[A1] 录制任务已结束，无法设置 recording_id {rec_id}: {camera_mac}")
 
     async def _auto_stop_recording(camera_mac: str):
         from app.models.camera import Camera as CameraModel
