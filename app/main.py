@@ -166,10 +166,101 @@ async def lifespan(app: FastAPI):
     logger.info(f"已从数据库恢复 {len(enabled_schedules)} 个调度任务")
 
     camera_health_checker = CameraHealthChecker(settings.camera_health_interval_seconds)
+
+    async def _auto_start_recording(camera_mac: str):
+        from app.models.camera import Camera as CameraModel
+        from app.models.recording import Recording as RecordingModel
+        async with AsyncSessionLocal() as db:
+            cam = (await db.execute(
+                select(CameraModel).where(CameraModel.device_mac == camera_mac)
+            )).scalar_one_or_none()
+            if not cam or not cam.rtsp_url or cam.is_recording:
+                return
+            rec = RecordingModel(
+                camera_mac=camera_mac,
+                file_path="(pending)",
+                started_at=datetime.now(),
+                status="recording",
+            )
+            db.add(rec)
+            cam.is_recording = True
+            await db.commit()
+            await db.refresh(rec)
+            rec_id = rec.id
+
+        try:
+            await recorder.start_recording(camera_mac, cam.rtsp_url, settings.recording_segment_seconds)
+        except Exception as e:
+            logger.error(f"[A1] 自动录制启动失败 {camera_mac}: {e}")
+            async with AsyncSessionLocal() as db:
+                rec_db = (await db.execute(
+                    select(RecordingModel).where(RecordingModel.id == rec_id)
+                )).scalar_one_or_none()
+                if rec_db:
+                    rec_db.status = "failed"
+                    rec_db.error_msg = str(e)
+                cam_db = (await db.execute(
+                    select(CameraModel).where(CameraModel.device_mac == camera_mac)
+                )).scalar_one_or_none()
+                if cam_db:
+                    cam_db.is_recording = False
+                await db.commit()
+            return
+
+        if camera_mac in recorder.active:
+            recorder.active[camera_mac].recording_id = rec_id
+
+    async def _auto_stop_recording(camera_mac: str):
+        from app.models.camera import Camera as CameraModel
+        from app.models.recording import Recording as RecordingModel
+        output_path = await recorder.stop_recording(camera_mac)
+        ended_at = datetime.now()
+
+        async with AsyncSessionLocal() as db:
+            cam = (await db.execute(
+                select(CameraModel).where(CameraModel.device_mac == camera_mac)
+            )).scalar_one_or_none()
+            if cam:
+                cam.is_recording = False
+
+            rec = (await db.execute(
+                select(RecordingModel)
+                .where(RecordingModel.camera_mac == camera_mac, RecordingModel.status == "recording")
+                .order_by(RecordingModel.started_at.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+
+            if rec:
+                if output_path and output_path.exists():
+                    loop = asyncio.get_running_loop()
+                    try:
+                        dest = await loop.run_in_executor(
+                            None, lambda: nas_syncer.sync_file(output_path, camera_mac)
+                        )
+                        rec.file_path = str(dest)
+                        rec.file_size = dest.stat().st_size if dest.exists() else None
+                    except Exception as e:
+                        logger.error(f"[A1] 停止录制 NAS 同步失败 {camera_mac}: {e}")
+                        rec.file_path = str(output_path)
+                        rec.file_size = output_path.stat().st_size if output_path.exists() else None
+                    rec.status = "completed"
+                else:
+                    rec.status = "failed"
+                    rec.error_msg = "presence-triggered stop: no valid output"
+                rec.ended_at = ended_at
+
+            await db.commit()
+
+        await ws_manager.broadcast("recording_completed", {"camera_mac": camera_mac})
+        logger.info(f"[A1] 自动停止录制完成: {camera_mac}")
+
     recorder.set_callbacks(on_complete=_on_recording_complete, on_failed=_on_recording_failed)
     await recorder.start_monitor()
     presence_service._poll_interval = settings.presence_poll_interval_seconds
-    await presence_service.start()
+    await presence_service.start(
+        auto_start_cb=_auto_start_recording,
+        auto_stop_cb=_auto_stop_recording,
+    )
     await camera_health_checker.start()
     app.state.camera_health_checker = camera_health_checker
     app.state.recorder = recorder

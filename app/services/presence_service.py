@@ -46,8 +46,12 @@ class PresenceService:
         self._poll_interval = poll_interval
         self._task: asyncio.Task | None = None
         self._initialized = False
+        self._auto_start_cb = None   # async (camera_mac: str) -> None
+        self._auto_stop_cb = None    # async (camera_mac: str) -> None
 
-    async def start(self):
+    async def start(self, auto_start_cb=None, auto_stop_cb=None):
+        self._auto_start_cb = auto_start_cb
+        self._auto_stop_cb = auto_stop_cb
         self._task = asyncio.create_task(self._loop())
         logger.info(f"PresenceService 已启动，轮询间隔 {self._poll_interval}s")
 
@@ -161,6 +165,29 @@ class PresenceService:
 
         if member.webhook_url:
             await self._send_webhook(member.webhook_url, ws_event, member, triggered_mac, now)
+
+        # A1: trigger auto recordings
+        auto_cams = member.auto_record_cameras if isinstance(member.auto_record_cameras, list) else []
+        if auto_cams:
+            if is_home and self._auto_start_cb:
+                for cam_mac in auto_cams:
+                    asyncio.create_task(self._auto_start_cb(cam_mac))
+            elif not is_home and self._auto_stop_cb:
+                await self._trigger_auto_stop(session, member, auto_cams)
+
+    async def _trigger_auto_stop(self, session, member, camera_macs: list[str]):
+        from app.models.member import Member as MemberModel
+        other_home = (await session.execute(
+            select(MemberModel).where(MemberModel.is_home == True, MemberModel.id != member.id)
+        )).scalars().all()
+
+        for cam_mac in camera_macs:
+            other_wants = any(
+                isinstance(m.auto_record_cameras, list) and cam_mac in m.auto_record_cameras
+                for m in other_home
+            )
+            if not other_wants and self._auto_stop_cb:
+                asyncio.create_task(self._auto_stop_cb(cam_mac))
 
     async def _send_webhook(self, url: str, event: str, member: Member, triggered_mac: str | None, ts: datetime):
         try:
