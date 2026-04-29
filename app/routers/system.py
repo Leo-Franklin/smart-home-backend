@@ -1,12 +1,19 @@
 import time
+import asyncio
 import subprocess
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi import HTTPException, status
 from pydantic import BaseModel
+from sqlalchemy import select, func, not_, exists
 from app.config import get_settings
 from app.auth import verify_password, create_access_token
 from app.deps import DBDep, CurrentUser
+from app.models.member import Member, MemberDevice
+from app.models.camera import Camera
+from app.models.device import Device
+from app.models.recording import Recording
 
 router = APIRouter()
 _start_time = time.time()
@@ -82,3 +89,64 @@ async def login(form: OAuth2PasswordRequestForm = Depends()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
     token = create_access_token(form.username, settings.jwt_secret_key)
     return TokenResponse(access_token=token)
+
+
+@router.get("/dashboard", tags=["system"])
+async def dashboard(db: DBDep, _: CurrentUser):
+    today_start = datetime.now(timezone.utc).replace(
+        tzinfo=None, hour=0, minute=0, second=0, microsecond=0
+    )
+
+    async def scalar(stmt):
+        result = await db.execute(stmt)
+        return result.scalar_one()
+
+    (
+        members_home,
+        members_total,
+        cameras_recording,
+        cameras_online,
+        cameras_total,
+        devices_online,
+        devices_total,
+        recordings_today_count,
+        recordings_today_duration,
+        unknown_devices_today,
+    ) = await asyncio.gather(
+        scalar(select(func.count()).select_from(Member).where(Member.is_home == True)),
+        scalar(select(func.count()).select_from(Member)),
+        scalar(select(func.count()).select_from(Camera).where(Camera.is_recording == True)),
+        scalar(select(func.count()).select_from(Camera).where(Camera.is_online == True)),
+        scalar(select(func.count()).select_from(Camera)),
+        scalar(select(func.count()).select_from(Device).where(Device.is_online == True)),
+        scalar(select(func.count()).select_from(Device)),
+        scalar(
+            select(func.count()).select_from(Recording)
+            .where(Recording.started_at >= today_start)
+        ),
+        scalar(
+            select(func.coalesce(func.sum(Recording.duration), 0))
+            .where(Recording.started_at >= today_start)
+            .where(Recording.status.in_(["completed", "synced"]))
+        ),
+        scalar(
+            select(func.count()).select_from(Device)
+            .where(Device.created_at >= today_start)
+            .where(
+                not_(exists(select(MemberDevice.mac).where(MemberDevice.mac == Device.mac)))
+            )
+        ),
+    )
+
+    return {
+        "members_home": members_home,
+        "members_total": members_total,
+        "cameras_recording": cameras_recording,
+        "cameras_online": cameras_online,
+        "cameras_total": cameras_total,
+        "devices_online": devices_online,
+        "devices_total": devices_total,
+        "recordings_today_count": recordings_today_count,
+        "recordings_today_duration_seconds": recordings_today_duration,
+        "unknown_devices_today": unknown_devices_today,
+    }
