@@ -1,35 +1,14 @@
 import math
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select, func
 from pathlib import Path
 from typing import Annotated
-from app.deps import DBDep, CurrentUser
+from app.deps import DBDep, CurrentUser, StreamUser
 from app.models.recording import Recording
 from app.schemas.recording import RecordingOut
 from app.schemas import PagedResponse
-from app.auth import verify_token
 from app.config import get_settings
-
-bearer = HTTPBearer(auto_error=False)
-
-
-async def get_stream_user(
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-    token: str | None = None,
-) -> str:
-    raw = credentials.credentials if credentials else token
-    if not raw:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    settings = get_settings()
-    username = verify_token(raw, settings.jwt_secret_key)
-    if username is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return username
-
-
-StreamUser = Annotated[str, Depends(get_stream_user)]
 
 router = APIRouter(prefix="/recordings", tags=["recordings"])
 
@@ -152,6 +131,48 @@ async def stream_recording(recording_id: int, request: Request, db: DBDep, _: St
     return StreamingResponse(
         iter_full(), media_type="video/mp4",
         headers={"Content-Length": str(file_size), "Accept-Ranges": "bytes"},
+    )
+
+
+@router.get("/{recording_id}/download")
+async def download_recording(recording_id: int, db: DBDep, _: StreamUser):
+    result = await db.execute(select(Recording).where(Recording.id == recording_id))
+    recording = result.scalar_one_or_none()
+    if not recording:
+        raise HTTPException(status_code=404, detail="录像不存在")
+
+    if recording.status not in ("completed", "synced"):
+        raise HTTPException(status_code=409, detail="录像尚未完成，无法下载")
+
+    file_path = Path(recording.file_path)
+    settings = get_settings()
+    storage_root = Path(settings.local_storage_path).resolve()
+    if not file_path.is_absolute():
+        raise HTTPException(status_code=403, detail="文件路径不合法")
+    try:
+        resolved = file_path.resolve()
+        if not resolved.is_relative_to(storage_root):
+            raise HTTPException(status_code=403, detail="文件路径不合法")
+    except ValueError:
+        raise HTTPException(status_code=403, detail="文件路径不合法")
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    file_size = file_path.stat().st_size
+    filename = file_path.name
+
+    def iter_full():
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                yield chunk
+
+    return StreamingResponse(
+        iter_full(), media_type="video/mp4",
+        headers={
+            "Content-Length": str(file_size),
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
     )
 
 

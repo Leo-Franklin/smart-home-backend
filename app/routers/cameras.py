@@ -2,8 +2,9 @@ import asyncio
 from datetime import datetime
 from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
-from app.deps import DBDep, CurrentUser, RecorderDep, NasSyncerDep
+from app.deps import DBDep, CurrentUser, StreamUser, RecorderDep, NasSyncerDep
 from app.models.camera import Camera
 from app.models.recording import Recording
 from app.schemas.camera import CameraCreate, CameraUpdate, CameraOut
@@ -204,3 +205,74 @@ async def stop_recording(mac: str, db: DBDep, _: CurrentUser, recorder: Recorder
     await db.commit()
     await ws_manager.broadcast("recording_completed", {"camera_mac": mac, "recording_id": recording_id})
     return {"message": "录制已停止"}
+
+
+# ── MJPEG live stream ─────────────────────────────────────────
+
+def _rtsp_with_creds(camera: Camera) -> str:
+    """Embed ONVIF credentials into the RTSP URL if present."""
+    url = camera.rtsp_url
+    if camera.onvif_user or camera.onvif_password:
+        parsed = urlparse(url)
+        netloc = f"{camera.onvif_user or ''}:{camera.onvif_password or ''}@{parsed.hostname or ''}"
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        url = urlunparse(parsed._replace(netloc=netloc))
+    return url
+
+
+async def _mjpeg_generate(rtsp_url: str):
+    """Async generator: reads RTSP via FFmpeg and yields multipart/x-mixed-replace frames."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y",
+        "-rtsp_transport", "tcp",
+        "-i", rtsp_url,
+        "-f", "mjpeg",
+        "-q:v", "5",
+        "-vf", "fps=10",
+        "pipe:1",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        buf = b""
+        SOI, EOI = b"\xff\xd8", b"\xff\xd9"
+        while True:
+            chunk = await proc.stdout.read(32768)
+            if not chunk:
+                break
+            buf += chunk
+            while True:
+                start = buf.find(SOI)
+                if start < 0:
+                    buf = b""
+                    break
+                end = buf.find(EOI, start + 2)
+                if end < 0:
+                    buf = buf[start:]
+                    break
+                frame = buf[start: end + 2]
+                buf = buf[end + 2:]
+                yield (
+                    b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                    + frame
+                    + b"\r\n"
+                )
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+
+
+@router.get("/{mac}/stream/mjpeg")
+async def stream_mjpeg(mac: str, db: DBDep, _: StreamUser):
+    result = await db.execute(select(Camera).where(Camera.device_mac == mac))
+    camera = result.scalar_one_or_none()
+    if not camera:
+        raise HTTPException(status_code=404, detail="摄像头未配置")
+    if not camera.rtsp_url:
+        raise HTTPException(status_code=422, detail="摄像头 rtsp_url 未设置，请先通过 ONVIF 探测配置 RTSP 地址")
+    return StreamingResponse(
+        _mjpeg_generate(_rtsp_with_creds(camera)),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )

@@ -25,6 +25,24 @@ async def get_current_user(
     return username
 
 
+async def get_stream_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    token: str | None = None,
+) -> str:
+    """Accept Bearer header OR ?token= query param — for endpoints used directly in <video>/<img> src."""
+    raw = credentials.credentials if credentials else token
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    settings = get_settings()
+    username = verify_token(raw, settings.jwt_secret_key)
+    if username is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+    return username
+
+
+StreamUser = Annotated[str, Depends(get_stream_user)]
+
+
 def get_recorder(request: Request) -> Recorder:
     return request.app.state.recorder
 
