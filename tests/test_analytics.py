@@ -1,7 +1,7 @@
 # tests/test_analytics.py
 import pytest
 import pytest_asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
@@ -49,3 +49,153 @@ async def test_device_online_log_insert(mem_db):
     assert rows[0].bucket_hour == datetime(2024, 1, 15, 14, 0, 0)
     assert rows[0].online_count == 3
     assert rows[0].scan_count == 5
+
+
+import os
+from httpx import AsyncClient, ASGITransport
+
+
+_JWT_KEY = "test_secret_key_that_is_at_least_32_characters_long"
+_ADMIN_PW = "testpassword12345"
+
+
+@pytest_asyncio.fixture
+async def client(mem_db, monkeypatch):
+    """AsyncClient backed by in-memory DB, with auth token."""
+    monkeypatch.setenv("JWT_SECRET_KEY", _JWT_KEY)
+    monkeypatch.setenv("ADMIN_PASSWORD", _ADMIN_PW)
+
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    from app.database import get_db
+    from app.main import app as fastapi_app
+
+    async def override_get_db():
+        async with mem_db() as session:
+            yield session
+
+    fastapi_app.dependency_overrides[get_db] = override_get_db
+
+    from app.auth import create_access_token
+    token = create_access_token("admin", _JWT_KEY)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=fastapi_app), base_url="http://test"
+    ) as c:
+        c.headers.update(headers)
+        yield c
+
+    fastapi_app.dependency_overrides.pop(get_db, None)
+    get_settings.cache_clear()
+
+
+@pytest_asyncio.fixture
+async def seeded_client(mem_db, monkeypatch):
+    """client fixture with Device and Recording rows pre-seeded."""
+    monkeypatch.setenv("JWT_SECRET_KEY", _JWT_KEY)
+    monkeypatch.setenv("ADMIN_PASSWORD", _ADMIN_PW)
+
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    from app.models.device import Device
+    from app.models.recording import Recording
+    from app.models.camera import Camera
+
+    # Use recent dates so they fall within the 90-day range filter
+    day0 = datetime.now() - timedelta(days=5)   # 2 recordings on this day
+    day1 = datetime.now() - timedelta(days=4)   # 1 recording on this day
+    day0_str = day0.strftime("%Y-%m-%d")
+    day1_str = day1.strftime("%Y-%m-%d")
+
+    async with mem_db() as db:
+        db.add_all([
+            Device(mac="AA:BB:CC:DD:EE:01", device_type="camera",
+                   alias="Cam1", response_time_ms=30.0, is_online=True),
+            Device(mac="AA:BB:CC:DD:EE:02", device_type="phone",
+                   hostname="phone1", response_time_ms=120.0, is_online=True),
+            Device(mac="AA:BB:CC:DD:EE:03", device_type="camera",
+                   response_time_ms=None, is_online=False),
+        ])
+        await db.commit()
+        db.add(Camera(device_mac="AA:BB:CC:DD:EE:01", onvif_host="192.168.1.10", rtsp_url="rtsp://x"))
+        await db.commit()
+        db.add_all([
+            Recording(camera_mac="AA:BB:CC:DD:EE:01", file_path="/f1",
+                      started_at=day0.replace(hour=10, minute=0), status="completed"),
+            Recording(camera_mac="AA:BB:CC:DD:EE:01", file_path="/f2",
+                      started_at=day0.replace(hour=12, minute=0), status="completed"),
+            Recording(camera_mac="AA:BB:CC:DD:EE:01", file_path="/f3",
+                      started_at=day1.replace(hour=9, minute=0), status="completed"),
+        ])
+        await db.commit()
+
+    from app.database import get_db
+    from app.main import app as fastapi_app
+
+    async def override_get_db():
+        async with mem_db() as session:
+            yield session
+
+    fastapi_app.dependency_overrides[get_db] = override_get_db
+
+    from app.auth import create_access_token
+    token = create_access_token("admin", _JWT_KEY)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=fastapi_app), base_url="http://test"
+    ) as c:
+        c.headers.update(headers)
+        # Expose computed date strings for assertions
+        c._day0_str = day0_str
+        c._day1_str = day1_str
+        yield c
+
+    fastapi_app.dependency_overrides.pop(get_db, None)
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_device_type_stats(seeded_client):
+    resp = await seeded_client.get("/api/v1/analytics/device-type-stats")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    types = {row["type"]: row["count"] for row in data}
+    assert types["camera"] == 2
+    assert types["phone"] == 1
+
+
+@pytest.mark.asyncio
+async def test_response_time(seeded_client):
+    resp = await seeded_client.get("/api/v1/analytics/response-time")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    # Only devices with response_time_ms set (2 of 3)
+    assert len(data) == 2
+    assert all("avg_ms" in row and "name" in row and "mac" in row for row in data)
+    # alias takes priority over hostname
+    names = [row["name"] for row in data]
+    assert "Cam1" in names
+    assert "phone1" in names
+
+
+@pytest.mark.asyncio
+async def test_recording_calendar(seeded_client):
+    resp = await seeded_client.get("/api/v1/analytics/recording-calendar?range=90d")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    date_counts = {row["date"]: row["count"] for row in data}
+    assert date_counts.get(seeded_client._day0_str) == 2
+    assert date_counts.get(seeded_client._day1_str) == 1
+
+
+@pytest.mark.asyncio
+async def test_new_devices(seeded_client):
+    resp = await seeded_client.get("/api/v1/analytics/new-devices?range=90d&group_by=week")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert len(data) >= 1
+    assert all("period" in row and "count" in row for row in data)
