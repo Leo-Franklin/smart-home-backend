@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import socket as _socket
 from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import FastAPI, Request
@@ -12,11 +13,13 @@ from app.config import get_settings
 from app.database import init_db, AsyncSessionLocal
 from app.models.camera import Camera
 from app.models.recording import Recording
+from app.models.dlna_device import DLNADevice
 from app.services.scheduler_service import scheduler_service
 from app.services.recorder import Recorder, RecordingTask
 from app.services.nas_syncer import NasSyncer
 from app.services.ws_manager import ws_manager
 from app.services.presence_service import presence_service
+from app.services.dlna_service import DLNAController
 from app.routers import system, devices, cameras, recordings, schedules, ws
 from app.routers import members, dlna
 from app.services.camera_health import CameraHealthChecker
@@ -73,8 +76,66 @@ async def _on_recording_complete(task: RecordingTask):
             cam.is_recording = False
 
         await db.commit()
+
+        # A4: auto DLNA cast
+        if cam and cam.auto_cast_dlna:
+            dlna_dev = (await db.execute(
+                select(DLNADevice).where(DLNADevice.udn == cam.auto_cast_dlna)
+            )).scalar_one_or_none()
+            if dlna_dev and dlna_dev.av_transport_url:
+                await _cast_recording(dlna_dev.av_transport_url, dest_str, task.camera_mac)
     logger.info(f"录制完成 [{task.camera_mac}] id={task.recording_id} 时长={duration}s")
     await ws_manager.broadcast("recording_completed", {"camera_mac": task.camera_mac, "recording_id": task.recording_id})
+
+
+async def _cast_recording(av_transport_url: str, file_path: str, camera_mac: str):
+    """A4: copy recording to dlna-media directory and cast to target DLNA device."""
+    import shutil
+    import time
+    from pathlib import Path as _P
+
+    src = _P(file_path)
+    if not src.exists():
+        logger.warning(f"[A4] 投屏跳过，文件不存在: {file_path}")
+        return
+
+    media_dir = _P("data/dlna_media")
+    media_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"auto_{int(time.time())}_{src.name}"
+    dest = media_dir / fname
+
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: shutil.copy2(src, dest))
+    except Exception as e:
+        logger.error(f"[A4] 复制录制文件到 dlna_media 失败: {e}")
+        return
+
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+    except Exception:
+        local_ip = "127.0.0.1"
+
+    port = get_settings().server_port
+    media_url = f"http://{local_ip}:{port}/dlna-media/{fname}"
+
+    try:
+        ctrl = DLNAController(av_transport_url)
+        await ctrl.set_uri(media_url)
+        await ctrl.play()
+        logger.info(f"[A4] 自动投屏成功: {camera_mac} → {media_url}")
+    except Exception as e:
+        logger.error(f"[A4] 自动投屏失败: {e}")
+        return
+
+    async def _cleanup():
+        await asyncio.sleep(3600)
+        dest.unlink(missing_ok=True)
+        logger.info(f"[A4] DLNA 临时文件已清理: {fname}")
+
+    asyncio.create_task(_cleanup())
 
 
 async def _on_recording_failed(task: RecordingTask, retcode: int, stderr: str):
