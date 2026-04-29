@@ -14,6 +14,7 @@ wheels/
 
 # Local recording data
 data/recordings/
+data/dlna_media
 
 # Local runtime data
 data/*.db

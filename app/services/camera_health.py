@@ -28,19 +28,19 @@ class CameraHealthChecker:
     async def _loop(self):
         while True:
             try:
-                async with AsyncSessionLocal() as db:
-                    await self._check_all(db)
+                await self._check_all()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.error(f"CameraHealthChecker 轮询异常: {e}")
             await asyncio.sleep(self._interval)
 
-    async def _check_all(self, db):
-        result = await db.execute(select(Camera).where(Camera.rtsp_url.isnot(None)))
-        cameras = result.scalars().all()
-        # Collect (mac, rtsp_url, is_online) snapshots — don't keep ORM objects across session boundaries
-        snapshots = [(cam.device_mac, cam.rtsp_url, cam.is_online) for cam in cameras]
+    async def _check_all(self):
+        # Short-lived read session — released before spawning concurrent probe tasks
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(Camera).where(Camera.rtsp_url.isnot(None)))
+            cameras = result.scalars().all()
+            snapshots = [(cam.device_mac, cam.rtsp_url, cam.is_online) for cam in cameras]
         await asyncio.gather(
             *[self._check_camera(device_mac, rtsp_url, was_online) for device_mac, rtsp_url, was_online in snapshots],
             return_exceptions=True,

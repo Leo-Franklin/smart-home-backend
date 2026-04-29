@@ -38,13 +38,19 @@ def _check_ffmpeg() -> bool:
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
 async def health_check(request: Request):
+    import asyncio
     from fastapi.responses import JSONResponse
     settings = get_settings()
     nas_syncer = request.app.state.nas_syncer
+    loop = asyncio.get_running_loop()
+    ffmpeg_ok, nas_ok = await asyncio.gather(
+        loop.run_in_executor(None, _check_ffmpeg),
+        loop.run_in_executor(None, nas_syncer.check_writable),
+    )
     checks = {
         "database": True,
-        "ffmpeg": _check_ffmpeg(),
-        "nas_writable": nas_syncer.check_writable(),
+        "ffmpeg": ffmpeg_ok,
+        "nas_writable": nas_ok,
     }
     all_ok = all(checks.values())
     response_data = HealthResponse(

@@ -67,8 +67,7 @@ class PresenceService:
     async def _loop(self):
         while True:
             try:
-                async with AsyncSessionLocal() as session:
-                    await self._check_all_members(session)
+                await self._check_all_members()
                 self._initialized = True
             except asyncio.CancelledError:
                 raise
@@ -76,64 +75,68 @@ class PresenceService:
                 logger.error(f"PresenceService 轮询异常: {e}")
             await asyncio.sleep(self._poll_interval)
 
-    async def _check_all_members(self, session):
-        result = await session.execute(select(Member))
-        members = result.scalars().all()
-        tasks = [self._check_member(session, m) for m in members]
-        await asyncio.gather(*tasks, return_exceptions=True)
+    async def _check_all_members(self):
+        # Short-lived read session — released before spawning concurrent ping tasks
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Member))
+            members = result.scalars().all()
+            snapshots = [{"id": m.id, "name": m.name, "is_home": m.is_home} for m in members]
+        await asyncio.gather(
+            *[self._check_member(snap) for snap in snapshots],
+            return_exceptions=True,
+        )
 
-    async def _check_member(self, session, member: Member):
+    async def _check_member(self, snap: dict):
         try:
-            is_home, triggered_mac = await self._is_member_home(session, member)
-            if not self._initialized:
-                # 首轮仅建立基准，不触发事件
-                member.is_home = is_home
-                await session.commit()
-                return
-            if is_home == member.is_home:
-                return
-            await self._fire_event(session, member, is_home, triggered_mac)
+            member_id = snap["id"]
+
+            # Read: fetch device IPs — session released before any network I/O
+            async with AsyncSessionLocal() as session:
+                bound = (await session.execute(
+                    select(MemberDevice).where(MemberDevice.member_id == member_id)
+                )).scalars().all()
+                macs = [d.mac for d in bound]
+                device_data: list[tuple[str, str]] = []
+                if macs:
+                    devices = (await session.execute(
+                        select(Device).where(Device.mac.in_(macs), Device.ip.isnot(None))
+                    )).scalars().all()
+                    device_data = [(d.ip, d.mac) for d in devices]
+
+            # Ping: no DB connection held during network I/O
+            is_home, triggered_mac = False, None
+            for ip, mac in device_data:
+                if await self._ping_ip(ip):
+                    is_home, triggered_mac = True, mac
+                    break
+
+            # Write: update results in a fresh session
+            async with AsyncSessionLocal() as session:
+                if triggered_mac:
+                    dev = (await session.execute(
+                        select(Device).where(Device.mac == triggered_mac)
+                    )).scalar_one_or_none()
+                    if dev:
+                        dev.is_online = True
+                        dev.last_seen = datetime.now()
+
+                member = (await session.execute(
+                    select(Member).where(Member.id == member_id)
+                )).scalar_one_or_none()
+                if not member:
+                    await session.commit()
+                    return
+                if not self._initialized:
+                    member.is_home = is_home
+                    await session.commit()
+                    return
+                if is_home == snap["is_home"]:
+                    await session.commit()
+                    return
+                await self._fire_event(session, member, is_home, triggered_mac)
+
         except Exception as e:
-            logger.warning(f"检测成员 {member.name} 失败: {e}")
-
-    async def _is_member_home(self, session, member: Member) -> tuple[bool, str | None]:
-        result = await session.execute(
-            select(MemberDevice).where(MemberDevice.member_id == member.id)
-        )
-        bound_devices = result.scalars().all()
-        if not bound_devices:
-            return False, None
-
-        macs = [d.mac for d in bound_devices]
-        device_result = await session.execute(
-            select(Device).where(Device.mac.in_(macs), Device.ip.isnot(None))
-        )
-        devices = device_result.scalars().all()
-
-        for device in devices:
-            if await self._ping_ip(device.ip):
-                # Update device online status on successful ping
-                device.is_online = True
-                device.last_seen = datetime.now()
-                return True, device.mac
-
-        return False, None
-
-    async def _ping_ip(self, ip: str) -> bool:
-        try:
-            if sys.platform == "win32":
-                cmd = ["ping", "-n", "1", "-w", "1000", ip]
-            else:
-                cmd = ["ping", "-c", "1", "-W", "1", ip]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=3)
-            return proc.returncode == 0
-        except (asyncio.TimeoutError, Exception):
-            return False
+            logger.warning(f"检测成员 {snap.get('name', snap.get('id'))} 失败: {e}")
 
     async def _fire_event(self, session, member: Member, is_home: bool, triggered_mac: str | None):
         event = "arrived" if is_home else "left"
@@ -188,6 +191,22 @@ class PresenceService:
             )
             if not other_wants and self._auto_stop_cb:
                 asyncio.create_task(self._auto_stop_cb(cam_mac))
+
+    async def _ping_ip(self, ip: str) -> bool:
+        try:
+            if sys.platform == "win32":
+                cmd = ["ping", "-n", "1", "-w", "1000", ip]
+            else:
+                cmd = ["ping", "-c", "1", "-W", "1", ip]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=3)
+            return proc.returncode == 0
+        except (asyncio.TimeoutError, Exception):
+            return False
 
     async def _send_webhook(self, url: str, event: str, member: Member, triggered_mac: str | None, ts: datetime):
         try:

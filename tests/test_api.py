@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import MagicMock, patch
 from httpx import AsyncClient, ASGITransport
 from app.main import app
 from app.config import get_settings
@@ -23,8 +24,12 @@ def test_env(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_health():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/v1/health")
+    mock_nas = MagicMock()
+    mock_nas.check_writable.return_value = True
+    app.state.nas_syncer = mock_nas
+    with patch("app.routers.system._check_ffmpeg", return_value=True):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/v1/health")
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "healthy"
