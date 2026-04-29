@@ -39,26 +39,34 @@ class CameraHealthChecker:
     async def _check_all(self, db):
         result = await db.execute(select(Camera).where(Camera.rtsp_url.isnot(None)))
         cameras = result.scalars().all()
+        # Collect (mac, rtsp_url, is_online) snapshots — don't keep ORM objects across session boundaries
+        snapshots = [(cam.device_mac, cam.rtsp_url, cam.is_online) for cam in cameras]
         await asyncio.gather(
-            *[self._check_camera(db, cam) for cam in cameras],
+            *[self._check_camera(device_mac, rtsp_url, was_online) for device_mac, rtsp_url, was_online in snapshots],
             return_exceptions=True,
         )
 
-    async def _check_camera(self, db, camera: Camera):
-        was_online = camera.is_online
-        is_now_online = await self._probe_rtsp(camera.rtsp_url)
-        camera.last_probe_at = datetime.now()
-        camera.is_online = is_now_online
-        await db.commit()
+    async def _check_camera(self, device_mac: str, rtsp_url: str, was_online: bool):
+        is_now_online = await self._probe_rtsp(rtsp_url)
+        async with AsyncSessionLocal() as db:
+            cam = (await db.execute(
+                select(Camera).where(Camera.device_mac == device_mac)
+            )).scalar_one_or_none()
+            if cam is None:
+                return
+            cam.last_probe_at = datetime.now()
+            cam.is_online = is_now_online
+            await db.commit()
 
         if was_online and not is_now_online:
-            await ws_manager.broadcast("camera_offline", {"mac": camera.device_mac})
-            logger.warning(f"[CameraHealth] 摄像头掉线: {camera.device_mac}")
+            await ws_manager.broadcast("camera_offline", {"mac": device_mac})
+            logger.warning(f"[CameraHealth] 摄像头掉线: {device_mac}")
         elif not was_online and is_now_online:
-            await ws_manager.broadcast("camera_online", {"mac": camera.device_mac})
-            logger.info(f"[CameraHealth] 摄像头恢复: {camera.device_mac}")
+            await ws_manager.broadcast("camera_online", {"mac": device_mac})
+            logger.info(f"[CameraHealth] 摄像头恢复: {device_mac}")
 
     async def _probe_rtsp(self, rtsp_url: str) -> bool:
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ffprobe", "-v", "quiet",
@@ -69,5 +77,13 @@ class CameraHealthChecker:
             )
             await asyncio.wait_for(proc.wait(), timeout=5)
             return proc.returncode == 0
-        except (asyncio.TimeoutError, Exception):
+        except asyncio.TimeoutError:
+            if proc is not None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+            return False
+        except Exception:
             return False
