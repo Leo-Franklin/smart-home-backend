@@ -46,5 +46,6 @@ async def test_device_online_log_insert(mem_db):
         rows = result.scalars().all()
     assert len(rows) == 1
     assert rows[0].mac == "AA:BB:CC:DD:EE:FF"
+    assert rows[0].bucket_hour == datetime(2024, 1, 15, 14, 0, 0)
     assert rows[0].online_count == 3
     assert rows[0].scan_count == 5

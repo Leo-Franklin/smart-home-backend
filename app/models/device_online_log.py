@@ -11,7 +11,7 @@ class DeviceOnlineLog(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     mac: Mapped[str] = mapped_column(String(17), nullable=False, index=True)
     bucket_hour: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
-    device_type: Mapped[str] = mapped_column(String(32), default="unknown")
+    device_type: Mapped[str] = mapped_column(String(32), default="unknown", server_default="unknown")
     online_count: Mapped[int] = mapped_column(Integer, default=0)
     scan_count: Mapped[int] = mapped_column(Integer, default=0)
 
