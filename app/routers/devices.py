@@ -1,9 +1,9 @@
 import asyncio
 import json
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, status, BackgroundTasks, Query
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case, Integer
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -262,6 +262,48 @@ async def get_topology(db: DBDep, _: CurrentUser):
                 "owners": mac_owners.get(d.mac, []),
             }
             for d in devices
+        ]
+    }
+
+
+_HEATMAP_RANGE_DAYS = {"7d": 7, "30d": 30, "90d": 90}
+
+
+@router.get("/heatmap")
+async def device_heatmap(
+    db: DBDep,
+    _: CurrentUser,
+    range_str: str = Query("7d", alias="range"),
+    device_type: str = Query(""),
+):
+    days = _HEATMAP_RANGE_DAYS.get(range_str, 7)
+    since = datetime.now() - timedelta(days=days)
+
+    q = (
+        select(
+            func.cast(func.strftime("%w", DeviceOnlineLog.bucket_hour), Integer).label("day"),
+            func.cast(func.strftime("%H", DeviceOnlineLog.bucket_hour), Integer).label("hour"),
+            func.sum(
+                case((DeviceOnlineLog.online_count > 0, 1), else_=0)
+            ).label("value"),
+        )
+        .where(DeviceOnlineLog.bucket_hour >= since)
+        .group_by(
+            func.strftime("%w", DeviceOnlineLog.bucket_hour),
+            func.strftime("%H", DeviceOnlineLog.bucket_hour),
+        )
+    )
+
+    if device_type:
+        types = [t.strip() for t in device_type.split(",") if t.strip()]
+        if types:
+            q = q.where(DeviceOnlineLog.device_type.in_(types))
+
+    result = await db.execute(q)
+    return {
+        "cells": [
+            {"day": row.day, "hour": row.hour, "value": row.value}
+            for row in result
         ]
     }
 

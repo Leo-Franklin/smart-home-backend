@@ -368,3 +368,25 @@ async def test_type_activity(history_client):
     assert all("hour" in row for row in data)
     hours = [row["hour"] for row in data]
     assert hours == list(range(24))
+
+
+@pytest.mark.asyncio
+async def test_device_heatmap(history_client):
+    resp = await history_client.get("/api/v1/devices/heatmap?range=7d")
+    assert resp.status_code == 200
+    cells = resp.json()["cells"]
+    assert isinstance(cells, list)
+    # Each cell has day (0-6), hour (0-23), value (int)
+    for cell in cells:
+        assert "day" in cell and "hour" in cell and "value" in cell
+        assert 0 <= cell["day"] <= 6
+        assert 0 <= cell["hour"] <= 23
+
+
+@pytest.mark.asyncio
+async def test_device_heatmap_type_filter(history_client):
+    resp = await history_client.get("/api/v1/devices/heatmap?range=7d&device_type=camera")
+    assert resp.status_code == 200
+    cells = resp.json()["cells"]
+    assert isinstance(cells, list)
+    assert all(cell["value"] >= 0 for cell in cells)
