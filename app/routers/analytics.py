@@ -68,7 +68,6 @@ async def new_devices(
     db: DBDep,
     _: CurrentUser,
     range_str: str = Query("90d", alias="range"),
-    group_by: str = Query("week"),
 ):
     since = datetime.now() - timedelta(days=_days(range_str))
     result = await db.execute(
