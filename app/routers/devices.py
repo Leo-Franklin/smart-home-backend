@@ -75,6 +75,31 @@ async def _enrich_device(scanner: Scanner, d: dict) -> dict:
     }
 
 
+def _find_unknown_devices(
+    enriched: list[dict],
+    existing_map: dict,
+    bound_macs: set[str],
+    now: datetime,
+    staleness_hours: int = 24,
+) -> list[dict]:
+    """Return devices not bound to any member that are new or stale (not seen recently)."""
+    result = []
+    for data in enriched:
+        mac = data["mac"]
+        if mac in bound_macs:
+            continue
+        existing = existing_map.get(mac)
+        is_new = existing is None
+        is_stale = (
+            existing is not None
+            and existing.last_seen is not None
+            and (now - existing.last_seen).total_seconds() > staleness_hours * 3600
+        )
+        if is_new or is_stale:
+            result.append(data)
+    return result
+
+
 async def _run_scan(network_range: str):
     loop = asyncio.get_running_loop()
     scanner = await loop.run_in_executor(None, Scanner, network_range)
@@ -119,6 +144,21 @@ async def _run_scan(network_range: str):
                         is_online=True, last_seen=now,
                     ))
             await db.commit()
+
+            # A2: unknown device detection
+            bound_result = await db.execute(select(MemberDevice.mac))
+            bound_macs = {row[0] for row in bound_result.all()}
+            unknowns = _find_unknown_devices(enriched, existing_map, bound_macs, now)
+            for u in unknowns:
+                await ws_manager.broadcast("unknown_device_detected", {
+                    "mac": u["mac"],
+                    "ip": u["ip"],
+                    "vendor": u.get("vendor"),
+                    "hostname": u.get("hostname"),
+                    "first_seen": now.isoformat(),
+                })
+            if unknowns:
+                logger.info(f"[A2] 发现 {len(unknowns)} 台陌生设备")
 
         await ws_manager.broadcast("scan_completed", results)
         logger.info(f"扫描完成: {results}")
