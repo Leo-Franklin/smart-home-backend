@@ -28,6 +28,7 @@ class CameraUpdate(BaseModel):
     rtsp_port: int | None = None
     rtsp_url: str | None = None
     stream_profile: str | None = None
+    auto_cast_dlna: str | None = None
 
 
 class CameraOut(BaseModel):
@@ -40,6 +41,9 @@ class CameraOut(BaseModel):
     rtsp_url: str | None
     stream_profile: str
     is_recording: bool
+    is_online: bool
+    last_probe_at: datetime | None
+    auto_cast_dlna: str | None
     created_at: datetime
 
     model_config = {"from_attributes": True}

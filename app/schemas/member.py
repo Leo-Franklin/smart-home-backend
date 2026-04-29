@@ -7,12 +7,14 @@ class MemberCreate(BaseModel):
     name: str
     avatar_url: str | None = None
     webhook_url: str | None = None
+    auto_record_cameras: list[int] = []
 
 
 class MemberUpdate(BaseModel):
     name: str | None = None
     avatar_url: str | None = None
     webhook_url: str | None = None
+    auto_record_cameras: list[int] | None = None
 
 
 class MemberOut(BaseModel):
@@ -23,6 +25,7 @@ class MemberOut(BaseModel):
     is_home: bool
     last_arrived_at: datetime | None
     last_left_at: datetime | None
+    auto_record_cameras: list[int]
     created_at: datetime
 
     model_config = {"from_attributes": True}
