@@ -1,4 +1,5 @@
 import math
+from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, status, Query
 from sqlalchemy import select, func
 from app.deps import DBDep, CurrentUser
@@ -7,7 +8,7 @@ from app.models.device import Device
 from app.schemas.member import (
     MemberCreate, MemberUpdate, MemberOut,
     MemberDeviceCreate, MemberDeviceOut,
-    PresenceLogOut,
+    PresenceLogOut, MemberStatsOut, DailyStats,
 )
 from app.schemas.device import DeviceOut
 from app.schemas import PagedResponse
@@ -151,3 +152,63 @@ async def list_presence_logs(
         page_size=page_size,
         pages=math.ceil(total / page_size) if total else 0,
     )
+
+
+@router.get("/{member_id}/stats", response_model=MemberStatsOut)
+async def get_member_stats(
+    member_id: int,
+    db: DBDep,
+    _: CurrentUser,
+    range_: str = Query("7d", alias="range", pattern="^(7d|30d)$"),
+):
+    member = (await db.execute(select(Member).where(Member.id == member_id))).scalar_one_or_none()
+    if not member:
+        _not_found()
+
+    days = 30 if range_ == "30d" else 7
+    now = datetime.now()
+    start_dt = now - timedelta(days=days)
+
+    # Determine if member was already home at start_dt
+    last_before = (await db.execute(
+        select(PresenceLog)
+        .where(PresenceLog.member_id == member_id, PresenceLog.occurred_at < start_dt)
+        .order_by(PresenceLog.occurred_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+
+    home_since: datetime | None = start_dt if (last_before and last_before.event == "arrived") else None
+
+    # All logs within range, oldest first
+    in_range = (await db.execute(
+        select(PresenceLog)
+        .where(PresenceLog.member_id == member_id, PresenceLog.occurred_at >= start_dt)
+        .order_by(PresenceLog.occurred_at.asc())
+    )).scalars().all()
+
+    # Build home intervals
+    intervals: list[tuple[datetime, datetime]] = []
+    for log in in_range:
+        if log.event == "arrived" and home_since is None:
+            home_since = log.occurred_at
+        elif log.event == "left" and home_since is not None:
+            intervals.append((home_since, log.occurred_at))
+            home_since = None
+    if home_since is not None:
+        intervals.append((home_since, now))
+
+    # Sum per-day overlap minutes
+    daily: list[DailyStats] = []
+    total_minutes = 0
+    for i in range(days):
+        day_start = datetime.combine((start_dt + timedelta(days=i)).date(), datetime.min.time())
+        day_end = day_start + timedelta(days=1)
+        mins = sum(
+            int((min(iv_end, day_end) - max(iv_start, day_start)).total_seconds() / 60)
+            for iv_start, iv_end in intervals
+            if min(iv_end, day_end) > max(iv_start, day_start)
+        )
+        daily.append(DailyStats(date=day_start.date().isoformat(), minutes=mins))
+        total_minutes += mins
+
+    return MemberStatsOut(total_minutes=total_minutes, daily=daily)

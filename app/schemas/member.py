@@ -54,3 +54,13 @@ class PresenceLogOut(BaseModel):
     occurred_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class DailyStats(BaseModel):
+    date: str    # "YYYY-MM-DD"
+    minutes: int
+
+
+class MemberStatsOut(BaseModel):
+    total_minutes: int
+    daily: list[DailyStats]
