@@ -1,5 +1,7 @@
 import asyncio
+import os
 import sys
+import threading
 import socket as _socket
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -9,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from sqlalchemy import select
-from app.config import get_settings
+from app.config import get_settings, is_packaged
 from app.database import init_db, AsyncSessionLocal
 from app.models.camera import Camera
 from app.models.recording import Recording
@@ -26,6 +28,16 @@ from app.routers import analytics
 from app.services.camera_health import CameraHealthChecker
 
 settings = get_settings()
+
+# In packaged mode, add bundled nmap and ffmpeg to PATH
+from app.config import is_packaged as _is_packaged
+if _is_packaged():
+    import sys as _sys
+    from pathlib import Path as _ExePath
+    _exe_dir = _ExePath(_sys.executable).parent
+    _path_additions = [str(_exe_dir / "nmap"), str(_exe_dir / "ffmpeg")]
+    _env_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = os.pathsep.join(_path_additions) + os.pathsep + _env_path
 
 # ── Loguru 配置 ──────────────────────────────────────────────────────
 logger.remove()
@@ -182,6 +194,18 @@ async def lifespan(app: FastAPI):
             await db.commit()
             logger.warning(f"启动清理: 重置 {len(stuck_recs)} 条孤立录制记录, {len(stuck_cams)} 台摄像头状态")
 
+    # Desktop mode: start tray icon and open browser
+    _shutdown_event = None
+    _tray_thread = None
+    if is_packaged():
+        from app.desktop import run_tray_icon, open_browser
+        _shutdown_event = threading.Event()
+        _tray_thread = threading.Thread(
+            target=run_tray_icon, args=(_shutdown_event,), daemon=True
+        )
+        _tray_thread.start()
+        open_browser()
+
     scheduler_service.start()
 
     # Restore enabled schedules from database
@@ -332,6 +356,9 @@ async def lifespan(app: FastAPI):
     app.state.nas_syncer = nas_syncer
     app.state.presence_service = presence_service
     yield
+    # Desktop mode cleanup
+    if _shutdown_event is not None:
+        _shutdown_event.set()
     await camera_health_checker.stop()
     await recorder.stop_monitor()
     await presence_service.stop()
@@ -372,6 +399,13 @@ app.include_router(ws.router)
 from pathlib import Path as _Path
 _Path("data/dlna_media").mkdir(parents=True, exist_ok=True)
 app.mount("/dlna-media", StaticFiles(directory="data/dlna_media"), name="dlna-media")
+
+# Serve Vue frontend in packaged mode
+if is_packaged():
+    import sys as _sys
+    _frontend_dir = _Path(getattr(_sys, "_MEIPASS", ".")) / "frontend"
+    if _frontend_dir.exists():
+        app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
 
 
 @app.exception_handler(Exception)
