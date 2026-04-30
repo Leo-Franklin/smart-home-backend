@@ -19,3 +19,6 @@ data/dlna_media
 # Local runtime data
 data/*.db
 data/*.log
+
+# Git worktrees
+.worktrees/
