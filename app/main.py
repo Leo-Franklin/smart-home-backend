@@ -381,3 +381,8 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"error": {"code": "INTERNAL_ERROR", "message": "服务器内部错误", "detail": str(exc)}},
     )
+
+
+def _dev():
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

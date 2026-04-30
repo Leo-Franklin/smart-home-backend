@@ -25,6 +25,15 @@ dependencies = [
     "uvicorn[standard]>=0.46.0",
 ]
 
+[project.scripts]
+dev = "app.main:_dev"
+
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
