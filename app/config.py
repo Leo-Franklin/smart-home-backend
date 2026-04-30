@@ -1,3 +1,6 @@
+import sys
+import configparser
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
 from functools import lru_cache
@@ -7,6 +10,29 @@ _INSECURE_JWT_DEFAULTS = {
     "",
 }
 _INSECURE_PASSWORD_DEFAULTS = {"change_me", ""}
+
+
+def is_packaged() -> bool:
+    """Returns True when running as a PyInstaller-bundled exe."""
+    return getattr(sys, "frozen", False)
+
+
+def get_data_dir() -> Path:
+    """
+    Packaged mode: read data_dir from app.cfg next to the exe.
+    Dev mode: use ./data relative to cwd.
+    """
+    if is_packaged():
+        exe_dir = Path(sys.executable).parent
+        cfg_path = exe_dir / "app.cfg"
+        config = configparser.ConfigParser()
+        config.read(cfg_path, encoding="utf-8")
+        data_dir_str = config.get("paths", "data_dir", fallback=str(exe_dir / "data"))
+        return Path(data_dir_str)
+    return Path("./data")
+
+
+_data_dir = get_data_dir()
 
 
 class Settings(BaseSettings):
@@ -25,7 +51,7 @@ class Settings(BaseSettings):
 
     # NAS / 本地存储
     nas_mode: str = "local"  # local | mount | smb
-    local_storage_path: str = "./data/recordings"
+    local_storage_path: str = str(_data_dir / "recordings")
     nas_mount_path: str = "/nas/cameras"
     nas_smb_host: str = ""
     nas_smb_share: str = ""
@@ -33,7 +59,7 @@ class Settings(BaseSettings):
     nas_smb_password: str = ""
 
     # Recording
-    recording_temp_dir: str = "/tmp/recordings"
+    recording_temp_dir: str = str(_data_dir / "recordings" / "tmp")
     recording_segment_seconds: int = 1800
     recording_retention_days: int = 30
 
@@ -49,7 +75,7 @@ class Settings(BaseSettings):
     cors_allow_origins: str = "http://localhost:5173"
 
     # Database
-    database_url: str = "sqlite+aiosqlite:///./data/smart_home.db"
+    database_url: str = f"sqlite+aiosqlite:///{_data_dir / 'smart_home.db'}"
 
     # App meta
     app_version: str = "1.0.0"
@@ -57,6 +83,8 @@ class Settings(BaseSettings):
     @field_validator("jwt_secret_key")
     @classmethod
     def jwt_secret_must_be_changed(cls, v: str) -> str:
+        if is_packaged():
+            return v  # packaged exe generates its own key at install time
         if v in _INSECURE_JWT_DEFAULTS or len(v) < 32:
             raise ValueError(
                 "JWT_SECRET_KEY 必须设置为至少 32 字符的随机字符串，"
@@ -67,6 +95,8 @@ class Settings(BaseSettings):
     @field_validator("admin_password")
     @classmethod
     def admin_password_must_be_changed(cls, v: str) -> str:
+        if is_packaged():
+            return v  # packaged exe manages its own credentials
         if v in _INSECURE_PASSWORD_DEFAULTS:
             raise ValueError(
                 "ADMIN_PASSWORD 不能使用默认值，"
