@@ -281,12 +281,127 @@ class Scanner:
             return []
 
     @staticmethod
-    def guess_device_type(vendor: str, open_ports: list[int]) -> str:
+    def guess_device_type(vendor: str, open_ports: list[int], hostname: str | None = None) -> str:
+        """Infer device type from vendor OUI name, open ports, and hostname."""
+        # --- Port-based detection (highest priority) ---
         if 554 in open_ports or 2020 in open_ports:
             return "camera"
+        if 631 in open_ports or 9100 in open_ports or 515 in open_ports:
+            return "printer"
+
         v = vendor.lower()
-        if any(kw in v for kw in ("apple", "samsung", "xiaomi", "huawei", "honor", "oppo", "vivo", "oneplus", "realme", "motorola", "nokia", "sony", )):
+        h = (hostname or "").lower()
+
+        # --- Hostname-based heuristics ---
+        if h:
+            if any(kw in h for kw in ("iphone", "ipad", "android", "galaxy", "redmi", "pixel")):
+                return "phone"
+            if any(kw in h for kw in ("macbook", "imac", "desktop", "laptop", "pc-", "workstation")):
+                return "computer"
+            if any(kw in h for kw in ("printer", "canon", "epson", "brother")):
+                return "printer"
+            if any(kw in h for kw in ("-tv", "smarttv", "lgwebos", "tizen", "roku", "fire-tv", "appletv", "apple-tv")):
+                return "tv"
+            if any(kw in h for kw in ("echo", "home-mini", "nest-", "homepod", "xiaoai")):
+                return "smart_speaker"
+            if any(kw in h for kw in ("switch", "playstation", "xbox", "ps5", "ps4")):
+                return "game_console"
+            if any(kw in h for kw in ("ipad", "tab-", "tablet", "galaxy-tab")):
+                return "tablet"
+            if any(kw in h for kw in ("cam", "ipc", "nvr", "dvr")):
+                return "camera"
+
+        # --- Vendor-based classification ---
+        # Routers / Network equipment
+        if any(kw in v for kw in (
+            "tp-link", "tplink", "tp link", "netgear", "d-link", "dlink",
+            "cisco", "linksys", "ubiquiti", "mikrotik", "zyxel", "tenda",
+            "ruijie", "h3c", "huawei technologies", "aruba", "juniper",
+            "netcore", "mercury", "fast(迅捷)", "fast ", "comfast", "wavlink",
+            "eero", "synology", "qnap", "buffalo",
+        )):
+            # Distinguish NAS from routers
+            if any(kw in v for kw in ("synology", "qnap", "buffalo")):
+                return "nas"
+            return "router"
+
+        # Phones / Tablets
+        if any(kw in v for kw in (
+            "apple", "samsung", "xiaomi", "huawei", "honor", "oppo", "vivo",
+            "oneplus", "realme", "motorola", "nokia", "sony mobile",
+            "google", "zte", "meizu", "transsion", "tecno", "infinix",
+            "nothing", "fairphone",
+        )):
             return "phone"
-        if any(kw in v for kw in ("intel", "realtek", "dell", "lenovo", "hp ", "asus")):
+
+        # Computers
+        if any(kw in v for kw in (
+            "intel", "realtek", "dell", "lenovo", "hewlett", "hp inc",
+            "acer", "msi", "gigabyte", "asustek", "microsoft",
+            "razer", "framework", "system76", "mini pc",
+            "vmware", "parallels", "virtualbox",
+        )):
             return "computer"
+
+        # Smart TVs / Streaming devices
+        if any(kw in v for kw in (
+            "lg electronics", "tcl", "hisense", "skyworth", "changhong",
+            "konka", "haier", "sharp", "philips", "panasonic",
+            "roku", "amazon technologies", "chromecast",
+            "vizio", "toshiba", "funai",
+        )):
+            return "tv"
+
+        # Smart speakers / Voice assistants
+        if any(kw in v for kw in (
+            "sonos", "harman", "bose", "bang & olufsen", "amazon.com",
+            "google llc", "apple inc", "baidu", "alibaba",
+        )):
+            # Apple/Google/Amazon are ambiguous; use hostname to disambiguate
+            if any(kw in h for kw in ("echo", "home", "nest", "homepod", "xiaoai", "tmall")):
+                return "smart_speaker"
+            # For Apple without hostname clue, default to phone
+            if "apple" in v:
+                return "phone"
+            return "smart_speaker"
+
+        # Printers / Scanners
+        if any(kw in v for kw in (
+            "canon", "epson", "brother", "ricoh", "xerox", "kyocera",
+            "lexmark", "konica", "sharp manufacturing",
+        )):
+            return "printer"
+
+        # Cameras / Security
+        if any(kw in v for kw in (
+            "hikvision", "dahua", "axis", "reolink", "amcrest",
+            "wyze", "ring", "arlo", "eufy", "imou", "uniview",
+            "tiandy", "kedacom", "sunell", "yushi",
+        )):
+            return "camera"
+
+        # IoT / Smart home devices
+        if any(kw in v for kw in (
+            "espressif", "tuya", "shenzhen", "hangzhou", "yeelight",
+            "aqara", "broadlink", "orvibo", "sonoff", "tasmota",
+            "switchbot", "ikea of sweden", "signify", "philips hue",
+            "lifx", "wemo", "meross", "gosund", "zigbee", "smartthings",
+            "nest", "ecobee", "honeywell", "midea", "gree", "aux",
+            "roborock", "dreame", "ecovacs", "irobot", "tineco",
+        )):
+            return "iot"
+
+        # Game consoles
+        if any(kw in v for kw in (
+            "nintendo", "sony interactive", "microsoft xbox", "valve",
+            "steam",
+        )):
+            return "game_console"
+
+        # Wearables
+        if any(kw in v for kw in (
+            "fitbit", "garmin", "amazfit", "zepp", "whoop",
+        )):
+            return "wearable"
+
         return "unknown"

@@ -73,8 +73,7 @@ async def _enrich_device(scanner: Scanner, d: dict) -> dict:
         "vendor": vendor or "Unknown",
         "hostname": hostname,
         "latency": latency,
-        # Infer type from vendor alone — avoids slow nmap during discovery
-        "device_type": scanner.guess_device_type(vendor or "", []),
+        "device_type": scanner.guess_device_type(vendor or "", [], hostname),
     }
 
 
@@ -181,6 +180,9 @@ async def _run_scan(network_range: str):
                     existing.response_time_ms = data["latency"]
                     existing.is_online = True
                     existing.last_seen = now
+                    # Re-classify if still unknown or if new info yields a better type
+                    if existing.device_type in ("unknown", None):
+                        existing.device_type = data["device_type"]
                 else:
                     results["new"] += 1
                     db.add(Device(
