@@ -1,5 +1,7 @@
 import asyncio
 import shutil
+import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -17,7 +19,7 @@ from loguru import logger
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
-_live_procs: dict[str, asyncio.subprocess.Process] = {}
+_live_procs: dict[str, subprocess.Popen] = {}
 _HLS_BASE = Path("data/hls")
 
 
@@ -227,46 +229,75 @@ def _rtsp_with_creds(camera: Camera) -> str:
 
 
 async def _mjpeg_generate(rtsp_url: str):
-    """Async generator: reads RTSP via FFmpeg and yields multipart/x-mixed-replace frames."""
-    proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y",
-        "-rtsp_transport", "tcp",
-        "-i", rtsp_url,
-        "-f", "mjpeg",
-        "-q:v", "5",
-        "-vf", "fps=10",
-        "pipe:1",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    try:
+    """Async generator: reads RTSP via FFmpeg and yields multipart/x-mixed-replace frames.
+    Uses subprocess.Popen + thread to avoid asyncio.create_subprocess_exec which requires
+    ProactorEventLoop on Windows (not available under uvicorn reload/SelectorEventLoop).
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=5)
+    proc_holder: list = [None]
+
+    def _run_ffmpeg():
+        proc = subprocess.Popen(
+            [
+                "ffmpeg", "-y",
+                "-rtsp_transport", "tcp",
+                "-i", rtsp_url,
+                "-f", "mjpeg",
+                "-q:v", "5",
+                "-vf", "fps=10",
+                "pipe:1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        proc_holder[0] = proc
         buf = b""
         SOI, EOI = b"\xff\xd8", b"\xff\xd9"
-        while True:
-            chunk = await proc.stdout.read(32768)
-            if not chunk:
-                break
-            buf += chunk
+        try:
             while True:
-                start = buf.find(SOI)
-                if start < 0:
-                    buf = b""
+                chunk = proc.stdout.read(32768)
+                if not chunk:
                     break
-                end = buf.find(EOI, start + 2)
-                if end < 0:
-                    buf = buf[start:]
-                    break
-                frame = buf[start: end + 2]
-                buf = buf[end + 2:]
-                yield (
-                    b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-                    + frame
-                    + b"\r\n"
-                )
+                buf += chunk
+                while True:
+                    start = buf.find(SOI)
+                    if start < 0:
+                        buf = b""
+                        break
+                    end = buf.find(EOI, start + 2)
+                    if end < 0:
+                        buf = buf[start:]
+                        break
+                    frame = buf[start: end + 2]
+                    buf = buf[end + 2:]
+                    future = asyncio.run_coroutine_threadsafe(queue.put(frame), loop)
+                    try:
+                        future.result(timeout=3)
+                    except Exception:
+                        return  # client disconnected or timeout
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+    t = threading.Thread(target=_run_ffmpeg, daemon=True)
+    t.start()
+    try:
+        while True:
+            frame = await queue.get()
+            if frame is None:
+                break
+            yield (
+                b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                + frame
+                + b"\r\n"
+            )
     finally:
-        if proc.returncode is None:
+        proc = proc_holder[0]
+        if proc and proc.poll() is None:
             proc.kill()
-        await proc.wait()
 
 
 @router.get("/{mac}/stream/mjpeg")
@@ -294,24 +325,32 @@ async def snapshot_camera(mac: str, db: DBDep, _: CurrentUser):
     if not camera.rtsp_url:
         raise HTTPException(status_code=422, detail="摄像头 rtsp_url 未设置，请先通过 ONVIF 探测配置 RTSP 地址")
     rtsp_url = _rtsp_with_creds(camera)
+    loop = asyncio.get_running_loop()
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y",
-            "-rtsp_transport", "tcp",
-            "-i", rtsp_url,
-            "-vframes", "1",
-            "-f", "image2",
-            "pipe:1",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+        completed = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-rtsp_transport", "tcp",
+                        "-i", rtsp_url,
+                        "-vframes", "1",
+                        "-f", "image2",
+                        "pipe:1",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=14,
+                ),
+            ),
+            timeout=15,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
-    except asyncio.TimeoutError:
-        proc.kill()
+    except (asyncio.TimeoutError, subprocess.TimeoutExpired):
         raise HTTPException(status_code=408, detail="截图超时，摄像头可能无信号")
-    if not stdout:
+    if not completed.stdout:
         raise HTTPException(status_code=500, detail="截图失败，摄像头可能无信号或连接异常")
-    return Response(content=stdout, media_type="image/jpeg")
+    return Response(content=completed.stdout, media_type="image/jpeg")
 
 
 # ── HLS live stream ───────────────────────────────────────────
@@ -324,45 +363,67 @@ async def start_live(mac: str, db: DBDep, _: CurrentUser):
         raise HTTPException(status_code=404, detail="摄像头未配置")
     if not camera.rtsp_url:
         raise HTTPException(status_code=422, detail="摄像头 rtsp_url 未设置，请先通过 ONVIF 探测配置 RTSP 地址")
-    if mac in _live_procs and _live_procs[mac].returncode is None:
+    if mac in _live_procs and _live_procs[mac].poll() is None:
         return {"message": "直播已在运行"}
     rtsp_url = _rtsp_with_creds(camera)
-    output_dir = _HLS_BASE / mac
+    output_dir = _HLS_BASE / mac.replace(":", "-")
+    # 每次启动前清理目录，确保无残留文件（Windows 上 stop 时 rmtree 可能静默失败）
+    if output_dir.exists():
+        shutil.rmtree(output_dir, ignore_errors=True)
     output_dir.mkdir(parents=True, exist_ok=True)
-    proc = await asyncio.create_subprocess_exec(
+    cmd = [
         "ffmpeg", "-y",
         "-rtsp_transport", "tcp",
         "-i", rtsp_url,
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-tune", "zerolatency",
+        "-g", "25",           # GOP=25帧，保证每秒至少1个IDR关键帧（配合hls_time=1）
+        "-sc_threshold", "0", # 禁用场景切换自动关键帧，保持固定间隔
         "-c:a", "aac",
         "-f", "hls",
-        "-hls_time", "2",
+        "-hls_time", "1",     # 缩短分片到1s，减少等待时间
         "-hls_list_size", "5",
         "-hls_flags", "delete_segments",
         str(output_dir / "index.m3u8"),
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
+    ]
+    loop = asyncio.get_running_loop()
+    stderr_path = output_dir / "ffmpeg.log"
+    stderr_file = open(stderr_path, "w")
+    # stderr写文件：保留诊断输出，同时避免管道缓冲区满后阻塞FFmpeg
+    proc = await loop.run_in_executor(
+        None,
+        lambda: subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=stderr_file),
     )
+    stderr_file.close()
     _live_procs[mac] = proc
-    await asyncio.sleep(2)
-    if proc.returncode is not None:
-        _live_procs.pop(mac, None)
-        raise HTTPException(status_code=500, detail="HLS 直播启动失败，请检查摄像头 RTSP 连接")
-    return {"message": "HLS 直播已启动"}
+    m3u8_path = output_dir / "index.m3u8"
+    for _ in range(60):  # poll up to 30 s (60 × 0.5 s)
+        await asyncio.sleep(0.5)
+        if proc.poll() is not None:
+            _live_procs.pop(mac, None)
+            ffmpeg_log = stderr_path.read_text(errors="replace")[-1000:] if stderr_path.exists() else ""
+            logger.error(f"HLS启动失败 [{mac}] 退出码={proc.returncode}\n{ffmpeg_log}")
+            raise HTTPException(status_code=500, detail="HLS 直播启动失败，请检查摄像头 RTSP 连接")
+        if m3u8_path.exists():
+            return {"message": "HLS 直播已启动"}
+    proc.kill()
+    _live_procs.pop(mac, None)
+    ffmpeg_log = stderr_path.read_text(errors="replace")[-1000:] if stderr_path.exists() else ""
+    logger.error(f"HLS启动超时 [{mac}]\n{ffmpeg_log}")
+    raise HTTPException(status_code=500, detail="HLS 直播启动超时，请检查摄像头 RTSP 连接")
 
 
 @router.delete("/{mac}/live/stop", status_code=status.HTTP_202_ACCEPTED)
 async def stop_live(mac: str, _: CurrentUser):
     proc = _live_procs.pop(mac, None)
-    if proc and proc.returncode is None:
+    if proc and proc.poll() is None:
         proc.kill()
         try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except asyncio.TimeoutError:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             pass
-    output_dir = _HLS_BASE / mac
+    output_dir = _HLS_BASE / mac.replace(":", "-")
     if output_dir.exists():
         shutil.rmtree(output_dir, ignore_errors=True)
     return {"message": "HLS 直播已停止"}

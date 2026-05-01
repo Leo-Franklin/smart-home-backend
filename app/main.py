@@ -5,8 +5,8 @@ import threading
 import socket as _socket
 from contextlib import asynccontextmanager
 from datetime import datetime
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -401,8 +401,20 @@ _Path("data/dlna_media").mkdir(parents=True, exist_ok=True)
 app.mount("/dlna-media", StaticFiles(directory="data/dlna_media"), name="dlna-media")
 
 # Serve HLS live stream segments written by FFmpeg
-_Path("data/hls").mkdir(parents=True, exist_ok=True)
-app.mount("/hls", StaticFiles(directory="data/hls"), name="hls")
+_HLS_BASE = _Path("data/hls")
+_HLS_BASE.mkdir(parents=True, exist_ok=True)
+
+@app.get("/hls/{path:path}", include_in_schema=False)
+async def serve_hls_file(path: str):
+    parts = path.split("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=404, detail="HLS file not found")
+    mac, filename = parts
+    file_path = _HLS_BASE / mac.replace(":", "-") / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="HLS file not found")
+    media_type = "application/vnd.apple.mpegurl" if filename.endswith(".m3u8") else "video/MP2T"
+    return FileResponse(str(file_path), media_type=media_type)
 
 # Serve Vue frontend in packaged mode
 if is_packaged():
@@ -412,9 +424,17 @@ if is_packaged():
         app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
 
 
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"code": str(exc.status_code), "message": exc.detail}},
+    )
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"未处理异常: {exc}", exc_info=True)
+    logger.error(f"未处理异常 [{type(exc).__qualname__}]: {exc!r}", exc_info=True)
     return JSONResponse(
         status_code=500,
         content={"error": {"code": "INTERNAL_ERROR", "message": "服务器内部错误", "detail": str(exc)}},

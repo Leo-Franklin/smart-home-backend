@@ -12,13 +12,8 @@ wheels/
 # Local environment files
 .env
 
-# Local recording data
-data/recordings/
-data/dlna_media
-
 # Local runtime data
-data/*.db
-data/*.log
+data/
 
 # Git worktrees
 .worktrees/
