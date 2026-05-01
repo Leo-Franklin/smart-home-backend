@@ -119,6 +119,14 @@ class PresenceService:
                     if dev:
                         dev.is_online = True
                         dev.last_seen = datetime.now()
+                elif device_data:
+                    # All pings failed — mark this member's bound devices offline
+                    bound_macs = [mac for _, mac in device_data]
+                    stale = (await session.execute(
+                        select(Device).where(Device.mac.in_(bound_macs), Device.is_online == True)
+                    )).scalars().all()
+                    for dev in stale:
+                        dev.is_online = False
 
                 member = (await session.execute(
                     select(Member).where(Member.id == member_id)

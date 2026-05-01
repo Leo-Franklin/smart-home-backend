@@ -400,6 +400,10 @@ from pathlib import Path as _Path
 _Path("data/dlna_media").mkdir(parents=True, exist_ok=True)
 app.mount("/dlna-media", StaticFiles(directory="data/dlna_media"), name="dlna-media")
 
+# Serve HLS live stream segments written by FFmpeg
+_Path("data/hls").mkdir(parents=True, exist_ok=True)
+app.mount("/hls", StaticFiles(directory="data/hls"), name="hls")
+
 # Serve Vue frontend in packaged mode
 if is_packaged():
     import sys as _sys

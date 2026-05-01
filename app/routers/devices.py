@@ -41,7 +41,7 @@ async def list_devices(
     total_result = await db.execute(select(func.count()).select_from(q.subquery()))
     total = total_result.scalar_one()
 
-    q = q.offset((page - 1) * page_size).limit(page_size)
+    q = q.order_by(Device.is_online.desc()).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(q)
     items = result.scalars().all()
 
@@ -193,6 +193,17 @@ async def _run_scan(network_range: str):
                         is_online=True, last_seen=now,
                     ))
             await db.commit()
+
+            # Mark devices absent from this scan as offline
+            if macs:
+                offline_result = await db.execute(
+                    select(Device).where(Device.is_online == True, Device.mac.notin_(macs))
+                )
+                offline_devices = offline_result.scalars().all()
+                for dev in offline_devices:
+                    dev.is_online = False
+                results["offline"] += len(offline_devices)
+                await db.commit()
 
             # A2: unknown device detection
             try:

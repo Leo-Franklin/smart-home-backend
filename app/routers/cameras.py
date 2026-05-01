@@ -1,7 +1,9 @@
 import asyncio
+import shutil
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse, urlunparse
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from app.deps import DBDep, CurrentUser, StreamUser, RecorderDep, NasSyncerDep
@@ -14,6 +16,9 @@ from app.services.ws_manager import ws_manager
 from loguru import logger
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
+
+_live_procs: dict[str, asyncio.subprocess.Process] = {}
+_HLS_BASE = Path("data/hls")
 
 
 @router.get("", response_model=list[CameraOut])
@@ -276,3 +281,88 @@ async def stream_mjpeg(mac: str, db: DBDep, _: StreamUser):
         _mjpeg_generate(_rtsp_with_creds(camera)),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+# ── Snapshot ──────────────────────────────────────────────────
+
+@router.get("/{mac}/snapshot")
+async def snapshot_camera(mac: str, db: DBDep, _: CurrentUser):
+    result = await db.execute(select(Camera).where(Camera.device_mac == mac))
+    camera = result.scalar_one_or_none()
+    if not camera:
+        raise HTTPException(status_code=404, detail="摄像头未配置")
+    if not camera.rtsp_url:
+        raise HTTPException(status_code=422, detail="摄像头 rtsp_url 未设置，请先通过 ONVIF 探测配置 RTSP 地址")
+    rtsp_url = _rtsp_with_creds(camera)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y",
+            "-rtsp_transport", "tcp",
+            "-i", rtsp_url,
+            "-vframes", "1",
+            "-f", "image2",
+            "pipe:1",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise HTTPException(status_code=408, detail="截图超时，摄像头可能无信号")
+    if not stdout:
+        raise HTTPException(status_code=500, detail="截图失败，摄像头可能无信号或连接异常")
+    return Response(content=stdout, media_type="image/jpeg")
+
+
+# ── HLS live stream ───────────────────────────────────────────
+
+@router.post("/{mac}/live/start", status_code=status.HTTP_202_ACCEPTED)
+async def start_live(mac: str, db: DBDep, _: CurrentUser):
+    result = await db.execute(select(Camera).where(Camera.device_mac == mac))
+    camera = result.scalar_one_or_none()
+    if not camera:
+        raise HTTPException(status_code=404, detail="摄像头未配置")
+    if not camera.rtsp_url:
+        raise HTTPException(status_code=422, detail="摄像头 rtsp_url 未设置，请先通过 ONVIF 探测配置 RTSP 地址")
+    if mac in _live_procs and _live_procs[mac].returncode is None:
+        return {"message": "直播已在运行"}
+    rtsp_url = _rtsp_with_creds(camera)
+    output_dir = _HLS_BASE / mac
+    output_dir.mkdir(parents=True, exist_ok=True)
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y",
+        "-rtsp_transport", "tcp",
+        "-i", rtsp_url,
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-c:a", "aac",
+        "-f", "hls",
+        "-hls_time", "2",
+        "-hls_list_size", "5",
+        "-hls_flags", "delete_segments",
+        str(output_dir / "index.m3u8"),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    _live_procs[mac] = proc
+    await asyncio.sleep(2)
+    if proc.returncode is not None:
+        _live_procs.pop(mac, None)
+        raise HTTPException(status_code=500, detail="HLS 直播启动失败，请检查摄像头 RTSP 连接")
+    return {"message": "HLS 直播已启动"}
+
+
+@router.delete("/{mac}/live/stop", status_code=status.HTTP_202_ACCEPTED)
+async def stop_live(mac: str, _: CurrentUser):
+    proc = _live_procs.pop(mac, None)
+    if proc and proc.returncode is None:
+        proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+    output_dir = _HLS_BASE / mac
+    if output_dir.exists():
+        shutil.rmtree(output_dir, ignore_errors=True)
+    return {"message": "HLS 直播已停止"}
