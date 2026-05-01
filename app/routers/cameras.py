@@ -81,13 +81,13 @@ async def probe_camera(mac: str, db: DBDep, _: CurrentUser):
     client = OnvifClient(camera.onvif_host, camera.onvif_port,
                          camera.onvif_user or "", camera.onvif_password or "")
     try:
-        info = await client.get_device_info()
-        profiles = await client.get_profiles()
+        info = await asyncio.wait_for(client.get_device_info(), timeout=12)
+        profiles = await asyncio.wait_for(client.get_profiles(), timeout=12)
 
         # 为每个 profile 获取 RTSP URI
         for p in profiles:
             try:
-                p["rtsp_url"] = await client.get_stream_uri(p["index"])
+                p["rtsp_url"] = await asyncio.wait_for(client.get_stream_uri(p["index"]), timeout=12)
             except Exception:
                 p["rtsp_url"] = None
 
@@ -98,7 +98,12 @@ async def probe_camera(mac: str, db: DBDep, _: CurrentUser):
             await db.commit()
 
         return {"device_info": info, "profiles": profiles, "auto_set_rtsp_url": auto_url}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="ONVIF 连接超时，请确认摄像头 IP 和端口是否正确")
     except Exception as e:
+        err_str = str(e).lower()
+        if "timeout" in err_str or "timed out" in err_str:
+            raise HTTPException(status_code=504, detail="ONVIF 连接超时，请确认摄像头 IP 和端口是否正确")
         raise HTTPException(status_code=500, detail=f"ONVIF 通信异常: {e}")
 
 

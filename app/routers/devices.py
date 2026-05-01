@@ -62,18 +62,32 @@ async def trigger_scan(background_tasks: BackgroundTasks, _: CurrentUser):
 
 
 async def _enrich_device(scanner: Scanner, d: dict) -> dict:
-    """Concurrently resolve vendor/hostname/latency for one device."""
-    vendor, hostname, latency = await asyncio.gather(
+    """Concurrently resolve vendor/hostname/latency/open_ports for one device."""
+    if d.get("is_local"):
+        vendor, hostname, latency = await asyncio.gather(
+            scanner.lookup_vendor(d["mac"]),
+            scanner.resolve_hostname(d["ip"]),
+            scanner.measure_latency(d["ip"]),
+        )
+        return {
+            "mac": d["mac"], "ip": d["ip"],
+            "vendor": vendor or "Unknown",
+            "hostname": hostname,
+            "latency": latency,
+            "device_type": "computer",
+        }
+    vendor, hostname, latency, open_ports = await asyncio.gather(
         scanner.lookup_vendor(d["mac"]),
         scanner.resolve_hostname(d["ip"]),
         scanner.measure_latency(d["ip"]),
+        scanner.probe_ports_async(d["ip"]),
     )
     return {
         "mac": d["mac"], "ip": d["ip"],
         "vendor": vendor or "Unknown",
         "hostname": hostname,
         "latency": latency,
-        "device_type": scanner.guess_device_type(vendor or "", [], hostname),
+        "device_type": scanner.guess_device_type(vendor or "", open_ports, hostname),
     }
 
 
@@ -180,9 +194,11 @@ async def _run_scan(network_range: str):
                     existing.response_time_ms = data["latency"]
                     existing.is_online = True
                     existing.last_seen = now
-                    # Re-classify if still unknown or if new info yields a better type
-                    if existing.device_type in ("unknown", None):
-                        existing.device_type = data["device_type"]
+                    # Update type whenever new scan yields a definite answer (not unknown),
+                    # so port-probe results can correct stale vendor-guessed types.
+                    new_type = data["device_type"]
+                    if existing.device_type in ("unknown", None) or new_type != "unknown":
+                        existing.device_type = new_type
                 else:
                     results["new"] += 1
                     db.add(Device(

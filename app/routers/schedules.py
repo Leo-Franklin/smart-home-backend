@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
+from datetime import datetime
 from app.deps import DBDep, CurrentUser
 from app.models.schedule import Schedule
 from app.schemas.schedule import ScheduleCreate, ScheduleUpdate, ScheduleOut
@@ -9,28 +10,64 @@ from loguru import logger
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
 
-def _make_recording_callback(request: Request):
+def _make_recording_callback(request: Request, segment_duration: int):
     recorder = request.app.state.recorder
 
     async def _trigger(camera_mac: str):
         from sqlalchemy import select as _select
+        from urllib.parse import urlparse, urlunparse
         from app.database import AsyncSessionLocal
         from app.models.camera import Camera as CameraModel
-        rtsp_url = None
+        from app.models.recording import Recording as RecordingModel
+        rec_id = None
         async with AsyncSessionLocal() as db:
-            result = await db.execute(
+            cam = (await db.execute(
                 _select(CameraModel).where(CameraModel.device_mac == camera_mac)
-            )
-            cam = result.scalar_one_or_none()
+            )).scalar_one_or_none()
             if not cam or not cam.rtsp_url:
                 logger.warning(f"调度录制: 摄像头 {camera_mac} 不存在或无 RTSP URL")
                 return
             if cam.is_recording:
                 logger.info(f"调度录制: {camera_mac} 已在录制中，跳过")
                 return
-            rtsp_url = cam.rtsp_url  # capture value inside session
-        if rtsp_url:
-            await recorder.start_recording(camera_mac=camera_mac, rtsp_url=rtsp_url)
+            rtsp_url = cam.rtsp_url
+            if cam.onvif_user or cam.onvif_password:
+                parsed = urlparse(rtsp_url)
+                netloc = f"{cam.onvif_user or ''}:{cam.onvif_password or ''}@{parsed.hostname or ''}"
+                if parsed.port:
+                    netloc += f":{parsed.port}"
+                rtsp_url = urlunparse(parsed._replace(netloc=netloc))
+            rec = RecordingModel(
+                camera_mac=camera_mac,
+                file_path="(pending)",
+                started_at=datetime.now(),
+                status="recording",
+            )
+            db.add(rec)
+            cam.is_recording = True
+            await db.commit()
+            await db.refresh(rec)
+            rec_id = rec.id
+        try:
+            await recorder.start_recording(camera_mac=camera_mac, rtsp_url=rtsp_url, segment_seconds=segment_duration)
+        except Exception as e:
+            logger.error(f"调度录制启动失败 {camera_mac}: {e}")
+            async with AsyncSessionLocal() as db:
+                rec_db = (await db.execute(
+                    _select(RecordingModel).where(RecordingModel.id == rec_id)
+                )).scalar_one_or_none()
+                if rec_db:
+                    rec_db.status = "failed"
+                    rec_db.error_msg = str(e)
+                cam_db = (await db.execute(
+                    _select(CameraModel).where(CameraModel.device_mac == camera_mac)
+                )).scalar_one_or_none()
+                if cam_db:
+                    cam_db.is_recording = False
+                await db.commit()
+            return
+        if camera_mac in recorder.active:
+            recorder.active[camera_mac].recording_id = rec_id
 
     return _trigger
 
@@ -51,7 +88,7 @@ async def create_schedule(body: ScheduleCreate, request: Request, db: DBDep, _: 
     await db.commit()
     await db.refresh(schedule)
     if schedule.enabled:
-        callback = _make_recording_callback(request)
+        callback = _make_recording_callback(request, schedule.segment_duration)
         try:
             scheduler_service.add_recording_job(
                 job_id=f"schedule_{schedule.id}",
@@ -89,7 +126,7 @@ async def update_schedule(schedule_id: int, body: ScheduleUpdate, request: Reque
 
     job_id = f"schedule_{schedule.id}"
     if schedule.enabled:
-        callback = _make_recording_callback(request)
+        callback = _make_recording_callback(request, schedule.segment_duration)
         try:
             scheduler_service.add_recording_job(
                 job_id=job_id,

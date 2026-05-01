@@ -215,36 +215,75 @@ async def lifespan(app: FastAPI):
             select(ScheduleModel).where(ScheduleModel.enabled == True)
         )
         enabled_schedules = [
-            {"id": s.id, "cron_expr": s.cron_expr, "camera_mac": s.camera_mac}
+            {"id": s.id, "cron_expr": s.cron_expr, "camera_mac": s.camera_mac, "segment_duration": s.segment_duration}
             for s in result.scalars().all()
         ]
 
-    async def _trigger_scheduled_recording(camera_mac: str):
-        from sqlalchemy import select as _select
-        from app.models.camera import Camera as CameraModel
-        rtsp_url = None
-        async with AsyncSessionLocal() as _db:
-            cam_result = await _db.execute(
-                _select(CameraModel).where(CameraModel.device_mac == camera_mac)
-            )
-            cam = cam_result.scalar_one_or_none()
-            if not cam or not cam.rtsp_url:
-                logger.warning(f"调度录制: 摄像头 {camera_mac} 不存在或无 RTSP URL")
+    def _make_scheduled_trigger(segment_duration: int):
+        async def _trigger(camera_mac: str):
+            from app.models.camera import Camera as CameraModel
+            from app.models.recording import Recording as RecordingModel
+            rtsp_url = None
+            rec_id = None
+            async with AsyncSessionLocal() as _db:
+                cam = (await _db.execute(
+                    select(CameraModel).where(CameraModel.device_mac == camera_mac)
+                )).scalar_one_or_none()
+                if not cam or not cam.rtsp_url:
+                    logger.warning(f"调度录制: 摄像头 {camera_mac} 不存在或无 RTSP URL")
+                    return
+                if cam.is_recording:
+                    logger.info(f"调度录制: {camera_mac} 已在录制中，跳过")
+                    return
+                from urllib.parse import urlparse, urlunparse
+                rtsp_url = cam.rtsp_url
+                if cam.onvif_user or cam.onvif_password:
+                    parsed = urlparse(rtsp_url)
+                    netloc = f"{cam.onvif_user or ''}:{cam.onvif_password or ''}@{parsed.hostname or ''}"
+                    if parsed.port:
+                        netloc += f":{parsed.port}"
+                    rtsp_url = urlunparse(parsed._replace(netloc=netloc))
+                rec = RecordingModel(
+                    camera_mac=camera_mac,
+                    file_path="(pending)",
+                    started_at=datetime.now(),
+                    status="recording",
+                )
+                _db.add(rec)
+                cam.is_recording = True
+                await _db.commit()
+                await _db.refresh(rec)
+                rec_id = rec.id
+            try:
+                await recorder.start_recording(camera_mac, rtsp_url, segment_duration)
+            except Exception as e:
+                logger.error(f"调度录制启动失败 {camera_mac}: {e}")
+                async with AsyncSessionLocal() as _db:
+                    rec_db = (await _db.execute(
+                        select(RecordingModel).where(RecordingModel.id == rec_id)
+                    )).scalar_one_or_none()
+                    if rec_db:
+                        rec_db.status = "failed"
+                        rec_db.error_msg = str(e)
+                    cam_db = (await _db.execute(
+                        select(CameraModel).where(CameraModel.device_mac == camera_mac)
+                    )).scalar_one_or_none()
+                    if cam_db:
+                        cam_db.is_recording = False
+                    await _db.commit()
                 return
-            if cam.is_recording:
-                logger.info(f"调度录制: {camera_mac} 已在录制中，跳过")
-                return
-            rtsp_url = cam.rtsp_url  # capture value inside session
-        if rtsp_url:
-            await recorder.start_recording(camera_mac=camera_mac, rtsp_url=rtsp_url)
+            if camera_mac in recorder.active:
+                recorder.active[camera_mac].recording_id = rec_id
+        return _trigger
 
     for sched in enabled_schedules:
         try:
+            callback = _make_scheduled_trigger(sched['segment_duration'])
             scheduler_service.add_recording_job(
                 job_id=f"schedule_{sched['id']}",
                 cron_expr=sched['cron_expr'],
                 camera_mac=sched['camera_mac'],
-                callback=_trigger_scheduled_recording,
+                callback=callback,
             )
         except Exception as e:
             logger.warning(f"恢复调度任务 schedule_{sched['id']} 失败: {e}")

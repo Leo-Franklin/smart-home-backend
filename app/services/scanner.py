@@ -177,7 +177,7 @@ class Scanner:
                 local_ip = s.getsockname()[0]
             mac = self._get_local_mac(local_ip)
             if mac:
-                return {"ip": local_ip, "mac": mac}
+                return {"ip": local_ip, "mac": mac, "is_local": True}
         except Exception:
             pass
         return None
@@ -262,6 +262,29 @@ class Scanner:
         except Exception:
             return "Unknown"
 
+    # Camera-relevant ports: RTSP(554), ONVIF-standard(2020), Hikvision/Dahua HTTP(80,8080),
+    # Dahua ONVIF alt(8000), HTTPS(443/8443)
+    _PROBE_PORTS = [554, 2020, 8000, 80, 8080, 443, 8443]
+
+    async def probe_ports_async(self, ip: str, timeout: float = 0.8) -> list[int]:
+        """Fast async socket-based port probe. No subprocess overhead."""
+        async def _check(port: int) -> int | None:
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(ip, port), timeout=timeout
+                )
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+                return port
+            except Exception:
+                return None
+
+        results = await asyncio.gather(*[_check(p) for p in self._PROBE_PORTS])
+        return [p for p in results if p is not None]
+
     async def probe_ports(self, ip: str) -> list[int]:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._probe_ports_sync, ip)
@@ -270,7 +293,7 @@ class Scanner:
         try:
             import nmap
             nm = nmap.PortScanner()
-            nm.scan(ip, "80,443,554,2020,8080,8443", arguments="-T4 --open")
+            nm.scan(ip, "80,443,554,2020,8000,8080,8443", arguments="-T4 --open")
             ports: list[int] = []
             if ip in nm.all_hosts():
                 for proto in nm[ip].all_protocols():
@@ -284,7 +307,8 @@ class Scanner:
     def guess_device_type(vendor: str, open_ports: list[int], hostname: str | None = None) -> str:
         """Infer device type from vendor OUI name, open ports, and hostname."""
         # --- Port-based detection (highest priority) ---
-        if 554 in open_ports or 2020 in open_ports:
+        # 554=RTSP, 2020=ONVIF-standard, 8000=Dahua/Hikvision ONVIF alt
+        if 554 in open_ports or 2020 in open_ports or 8000 in open_ports:
             return "camera"
         if 631 in open_ports or 9100 in open_ports or 515 in open_ports:
             return "printer"

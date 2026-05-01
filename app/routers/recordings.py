@@ -1,4 +1,5 @@
 import math
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
@@ -38,6 +39,29 @@ async def list_recordings(
         items=items, total=total, page=page, page_size=page_size,
         pages=math.ceil(total / page_size) if total else 0,
     )
+
+
+@router.get("/stats")
+async def get_recording_stats(
+    db: DBDep,
+    _: CurrentUser,
+    range: str = Query("7d", pattern=r"^\d+d$"),
+):
+    days = int(range[:-1])
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    total_result = await db.execute(
+        select(func.count(), func.sum(Recording.duration), func.sum(Recording.file_size))
+        .where(Recording.started_at >= since)
+    )
+    count, total_duration, total_size = total_result.one()
+
+    return {
+        "range": range,
+        "count": count or 0,
+        "total_duration": total_duration or 0,
+        "total_size": total_size or 0,
+    }
 
 
 @router.get("/{recording_id}", response_model=RecordingOut)

@@ -3,17 +3,20 @@ from loguru import logger
 
 
 class OnvifClient:
-    def __init__(self, host: str, port: int, user: str, password: str):
+    def __init__(self, host: str, port: int, user: str, password: str, timeout: int = 10):
         self.host = host
         self.port = port
         self.user = user
         self.password = password
+        self.timeout = timeout
         self._camera = None
 
     def _get_camera(self):
         if self._camera is None:
             from onvif import ONVIFCamera
-            self._camera = ONVIFCamera(self.host, self.port, self.user, self.password)
+            from zeep.transports import Transport
+            transport = Transport(timeout=self.timeout, operation_timeout=self.timeout)
+            self._camera = ONVIFCamera(self.host, self.port, self.user, self.password, transport=transport)
         return self._camera
 
     async def get_device_info(self) -> dict:
