@@ -30,6 +30,7 @@ async def list_devices(
     page_size: int = Query(20, ge=1, le=100),
     device_types: list[str] = Query([], alias="device_type"),
     online: bool | None = None,
+    search: str | None = Query(None),
 ):
     flat_types = [t for raw in device_types for t in raw.split(",") if t]
     q = select(Device)
@@ -37,6 +38,11 @@ async def list_devices(
         q = q.where(Device.device_type.in_(flat_types))
     if online is not None:
         q = q.where(Device.is_online == online)
+    if search:
+        q = q.where(
+            (Device.ip.contains(search)) |
+            (Device.mac.ilike(f"%{search}%"))
+        )
 
     total_result = await db.execute(select(func.count()).select_from(q.subquery()))
     total = total_result.scalar_one()
