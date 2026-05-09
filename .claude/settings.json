@@ -2,7 +2,8 @@
   "enabledPlugins": {
     "superpowers@obra-superpowers": true,
     "superpowers@claude-plugins-official": true,
-    "gstack@garrytan-gstack": true
+    "gstack@garrytan-gstack": true,
+    "understand-anything@understand-anything": true
   },
   "extraKnownMarketplaces": {
     "obra-superpowers": {

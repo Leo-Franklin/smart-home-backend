@@ -24,7 +24,7 @@ from app.services.presence_service import presence_service
 from app.services.dlna_service import DLNAController
 from app.routers import system, devices, cameras, recordings, schedules, ws
 from app.routers import members, dlna
-from app.routers import analytics
+from app.routers import analytics, user
 from app.services.camera_health import CameraHealthChecker
 
 settings = get_settings()
@@ -430,6 +430,7 @@ app.include_router(cameras.router, prefix=API_PREFIX)
 app.include_router(recordings.router, prefix=API_PREFIX)
 app.include_router(schedules.router, prefix=API_PREFIX)
 app.include_router(members.router, prefix=API_PREFIX)
+app.include_router(user.router, prefix=API_PREFIX)
 app.include_router(dlna.router, prefix=API_PREFIX)
 app.include_router(analytics.router, prefix=API_PREFIX)
 app.include_router(ws.router)
