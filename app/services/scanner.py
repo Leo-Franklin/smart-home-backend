@@ -264,7 +264,7 @@ class Scanner:
 
     # Camera-relevant ports: RTSP(554), ONVIF-standard(2020), Hikvision/Dahua HTTP(80,8080),
     # Dahua ONVIF alt(8000), HTTPS(443/8443)
-    _PROBE_PORTS = [554, 2020, 8000, 80, 8080, 443, 8443]
+    _PROBE_PORTS = [554, 2020, 8000, 8080, 8443, 8554, 5000, 80, 443]
 
     async def probe_ports_async(self, ip: str, timeout: float = 0.8) -> list[int]:
         """Fast async socket-based port probe. No subprocess overhead."""
@@ -308,7 +308,8 @@ class Scanner:
         """Infer device type from vendor OUI name, open ports, and hostname."""
         # --- Port-based detection (highest priority) ---
         # 554=RTSP, 2020=ONVIF-standard, 8000=Dahua/Hikvision ONVIF alt
-        if 554 in open_ports or 2020 in open_ports or 8000 in open_ports:
+        # 8080=Hikvision/Dahua HTTP, 8443=HTTPS alt, 8554=RTSP alt, 5000=ONVIF
+        if 554 in open_ports or 2020 in open_ports or 8000 in open_ports or 8080 in open_ports or 8443 in open_ports or 8554 in open_ports or 5000 in open_ports:
             return "camera"
         if 631 in open_ports or 9100 in open_ports or 515 in open_ports:
             return "printer"
@@ -347,6 +348,11 @@ class Scanner:
             # Distinguish NAS from routers
             if any(kw in v for kw in ("synology", "qnap", "buffalo")):
                 return "nas"
+            # TP-Link + camera hostname keywords → camera
+            if any(kw in v for kw in ("tp-link", "tplink", "tp link")) and hostname:
+                h = hostname.lower()
+                if any(kw in h for kw in ("cam", "ipc", "nvr", "dvr", "camera")):
+                    return "camera"
             return "router"
 
         # Phones / Tablets
