@@ -324,11 +324,16 @@ class Scanner:
         import http.client
         for port in (80, 8080, 443, 8443):
             try:
-                conn = http.client.HTTPConnection(ip, port, timeout=timeout)
-                conn.request("HEAD", "/")
-                resp = conn.getresponse()
-                server = resp.getheader("Server")
-                conn.close()
+                if port == 443:
+                    conn = http.client.HTTPSConnection(ip, port, timeout=timeout)
+                else:
+                    conn = http.client.HTTPConnection(ip, port, timeout=timeout)
+                try:
+                    conn.request("HEAD", "/")
+                    resp = conn.getresponse()
+                    server = resp.getheader("Server")
+                finally:
+                    conn.close()
                 if server:
                     return server
             except Exception:
