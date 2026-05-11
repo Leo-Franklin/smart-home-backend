@@ -262,8 +262,7 @@ class Scanner:
         except Exception:
             return "Unknown"
 
-    # Camera-relevant ports: RTSP(554), ONVIF-standard(2020), Hikvision/Dahua HTTP(80,8080),
-    # Dahua ONVIF alt(8000), HTTPS(443/8443)
+    # Probe ports for device fingerprinting: RTSP/ONVIF (camera), HTTP/HTTPS (web management), IPP/Raw/LPD (printer)
     _PROBE_PORTS = [554, 2020, 8000, 8080, 8443, 8554, 5000, 80, 443]
 
     async def probe_ports_async(self, ip: str, timeout: float = 0.8) -> list[int]:
@@ -293,7 +292,8 @@ class Scanner:
         try:
             import nmap
             nm = nmap.PortScanner()
-            nm.scan(ip, "80,443,554,2020,8000,8080,8443", arguments="-T4 --open")
+            ports_str = ",".join(str(p) for p in self._PROBE_PORTS)
+            nm.scan(ip, ports_str, arguments="-T4 --open")
             ports: list[int] = []
             if ip in nm.all_hosts():
                 for proto in nm[ip].all_protocols():
@@ -303,13 +303,14 @@ class Scanner:
             logger.debug(f"nmap 探测失败 {ip}: {e}")
             return []
 
+    # Camera ports for set-based detection
+    _CAMERA_PORTS = {554, 2020, 8000, 8080, 8443, 8554, 5000}
+
     @staticmethod
     def guess_device_type(vendor: str, open_ports: list[int], hostname: str | None = None) -> str:
         """Infer device type from vendor OUI name, open ports, and hostname."""
         # --- Port-based detection (highest priority) ---
-        # 554=RTSP, 2020=ONVIF-standard, 8000=Dahua/Hikvision ONVIF alt
-        # 8080=Hikvision/Dahua HTTP, 8443=HTTPS alt, 8554=RTSP alt, 5000=ONVIF
-        if 554 in open_ports or 2020 in open_ports or 8000 in open_ports or 8080 in open_ports or 8443 in open_ports or 8554 in open_ports or 5000 in open_ports:
+        if set(open_ports) & Scanner._CAMERA_PORTS:
             return "camera"
         if 631 in open_ports or 9100 in open_ports or 515 in open_ports:
             return "printer"
