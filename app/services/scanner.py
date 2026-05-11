@@ -340,7 +340,7 @@ class Scanner:
         # --- Vendor-based classification ---
         # Routers / Network equipment
         if any(kw in v for kw in (
-            "tp-link", "tplink", "tp link", "netgear", "d-link", "dlink",
+            "tp-link", "tplink", "tp link", "netgear", "d-link",
             "cisco", "linksys", "ubiquiti", "mikrotik", "zyxel", "tenda",
             "ruijie", "h3c", "huawei technologies", "aruba", "juniper",
             "netcore", "mercury", "fast(迅捷)", "fast ", "comfast", "wavlink",
@@ -408,12 +408,13 @@ class Scanner:
             "hikvision", "dahua", "axis", "reolink", "amcrest",
             "wyze", "ring", "arlo", "eufy", "imou", "uniview",
             "tiandy", "kedacom", "sunell", "yushi",
+            "ezviz", "萤石",
         )):
             return "camera"
 
         # IoT / Smart home devices
         if any(kw in v for kw in (
-            "espressif", "tuya", "shenzhen", "hangzhou", "yeelight",
+            "espressif", "tuya", "smartlife", "shenzhen", "hangzhou", "yeelight",
             "aqara", "broadlink", "orvibo", "sonoff", "tasmota",
             "switchbot", "ikea of sweden", "signify", "philips hue",
             "lifx", "wemo", "meross", "gosund", "zigbee", "smartthings",
