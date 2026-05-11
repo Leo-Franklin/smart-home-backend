@@ -82,18 +82,19 @@ async def _enrich_device(scanner: Scanner, d: dict) -> dict:
             "latency": latency,
             "device_type": "computer",
         }
-    vendor, hostname, latency, open_ports = await asyncio.gather(
+    vendor, hostname, latency, open_ports, http_banner = await asyncio.gather(
         scanner.lookup_vendor(d["mac"]),
         scanner.resolve_hostname(d["ip"]),
         scanner.measure_latency(d["ip"]),
         scanner.probe_ports_async(d["ip"]),
+        scanner.probe_http_banner_async(d["ip"]),
     )
     return {
         "mac": d["mac"], "ip": d["ip"],
         "vendor": vendor or "Unknown",
         "hostname": hostname,
         "latency": latency,
-        "device_type": scanner.guess_device_type(vendor or "", open_ports, hostname),
+        "device_type": scanner.guess_device_type(vendor or "", open_ports, hostname, http_banner),
     }
 
 

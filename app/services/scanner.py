@@ -24,6 +24,22 @@ try:
 except ImportError:
     _MAC_LOOKUP_AVAILABLE = False
 
+# HTTP Banner detection: (banner_fragment, device_type)
+_HTTP_BANNER_FINGERPRINTS: list[tuple[str, str]] = [
+    ("Dahua", "camera"),
+    ("DahuaTech", "camera"),
+    ("Hikvision", "camera"),
+    ("DS-", "camera"),          # Hikvision NVR prefix
+    ("Netwave", "camera"),
+    ("TVT", "camera"),
+    ("NVR", "camera"),
+    ("TP-LINK", "router"),
+    ("NETGEAR", "router"),
+    ("NetCore", "router"),
+    ("Realtek", "computer"),
+    ("Intel", "computer"),
+]
+
 
 def _detect_prefix_length(local_ip: str) -> int:
     """Detect the real prefix length for the interface that holds local_ip."""
@@ -303,12 +319,28 @@ class Scanner:
             logger.debug(f"nmap 探测失败 {ip}: {e}")
             return []
 
+    async def probe_http_banner_async(self, ip: str, timeout: float = 0.5) -> str | None:
+        """Send HTTP HEAD to open web port, return Server header or None."""
+        import http.client
+        for port in (80, 8080, 443, 8443):
+            try:
+                conn = http.client.HTTPConnection(ip, port, timeout=timeout)
+                conn.request("HEAD", "/")
+                resp = conn.getresponse()
+                server = resp.getheader("Server")
+                conn.close()
+                if server:
+                    return server
+            except Exception:
+                pass
+        return None
+
     # Camera ports for set-based detection
     _CAMERA_PORTS = {554, 2020, 8000, 8080, 8443, 8554, 5000}
 
     @staticmethod
-    def guess_device_type(vendor: str, open_ports: list[int], hostname: str | None = None) -> str:
-        """Infer device type from vendor OUI name, open ports, and hostname."""
+    def guess_device_type(vendor: str, open_ports: list[int], hostname: str | None = None, http_banner: str | None = None) -> str:
+        """Infer device type from vendor OUI name, open ports, hostname, and HTTP banner."""
         # --- Port-based detection (highest priority) ---
         if set(open_ports) & Scanner._CAMERA_PORTS:
             return "camera"
@@ -336,6 +368,13 @@ class Scanner:
                 return "tablet"
             if any(kw in h for kw in ("cam", "ipc", "nvr", "dvr")):
                 return "camera"
+
+        # --- HTTP Banner detection (higher priority than vendor, lower than ports/hostname) ---
+        if http_banner:
+            hb = http_banner.upper()
+            for fp, dev_type in _HTTP_BANNER_FINGERPRINTS:
+                if fp.upper() in hb:
+                    return dev_type
 
         # --- Vendor-based classification ---
         # Routers / Network equipment

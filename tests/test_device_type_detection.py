@@ -79,3 +79,44 @@ class TestGuessDeviceType:
         assert Scanner.guess_device_type("EZVIZ", []) == "camera"
         assert Scanner.guess_device_type("ezviz", []) == "camera"
         assert Scanner.guess_device_type("萤石", []) == "camera"
+
+    # --- HTTP Banner detection tests ---
+    def test_http_banner_dahua_camera(self):
+        """HTTP Server header 含 Dahua → camera"""
+        result = Scanner.guess_device_type("Unknown", [80], http_banner="Dahua")
+        assert result == "camera"
+
+    def test_http_banner_hikvision_camera(self):
+        result = Scanner.guess_device_type("Unknown", [80], http_banner="Hikvision")
+        assert result == "camera"
+
+    def test_http_banner_netwave_camera(self):
+        result = Scanner.guess_device_type("Unknown", [80], http_banner="Netwave")
+        assert result == "camera"
+
+    def test_http_banner_tplink_router(self):
+        """HTTP Server header 含 TP-LINK → router"""
+        result = Scanner.guess_device_type("Unknown", [80], http_banner="TP-LINK HTTP Server")
+        assert result == "router"
+
+    def test_http_banner_netgear_router(self):
+        result = Scanner.guess_device_type("Unknown", [80], http_banner="NETGEAR")
+        assert result == "router"
+
+    def test_http_banner_realtek_computer(self):
+        result = Scanner.guess_device_type("Unknown", [80], http_banner="Realtek")
+        assert result == "computer"
+
+    def test_http_banner_intel_computer(self):
+        result = Scanner.guess_device_type("Unknown", [80], http_banner="Intel")
+        assert result == "computer"
+
+    def test_http_banner_no_match_falls_back_to_vendor(self):
+        """HTTP banner 未命中时，fallback 到 vendor 判断"""
+        result = Scanner.guess_device_type("Intel", [80], http_banner="SomeUnknownServer")
+        assert result == "computer"
+
+    def test_http_banner_priority_over_vendor(self):
+        """HTTP banner 命中时优先于 vendor 匹配"""
+        result = Scanner.guess_device_type("Tuya", [80], http_banner="Dahua")
+        assert result == "camera"
