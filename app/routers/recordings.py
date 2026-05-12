@@ -295,3 +295,30 @@ async def delete_recording(recording_id: int, db: DBDep, _: CurrentUser):
             raise HTTPException(status_code=409, detail=f"文件正在使用中，请先关闭播放器再删除：{e.strerror}")
     await db.delete(recording)
     await db.commit()
+
+
+@router.post("/{recording_id}/open-folder")
+async def open_recording_folder(recording_id: int, db: DBDep, _: CurrentUser):
+    """在服务器端打开录像文件所在的文件夹（仅 Windows）"""
+    import subprocess
+
+    result = await db.execute(select(Recording).where(Recording.id == recording_id))
+    recording = result.scalar_one_or_none()
+    if not recording:
+        raise HTTPException(status_code=404, detail="录像不存在")
+
+    file_path = Path(recording.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    try:
+        # explorer.exe /select,<path> 在 Windows 上打开文件夹并选中文件
+        subprocess.Popen(
+            ["explorer.exe", "/select,", str(file_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"打开文件夹失败：{e}")
+
+    return {"message": "ok"}
