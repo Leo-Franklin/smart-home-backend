@@ -14,6 +14,53 @@ from app.config import get_settings
 router = APIRouter(prefix="/recordings", tags=["recordings"])
 
 
+def _compute_recording_extra(file_path: str, settings) -> tuple[str, str | None, str]:
+    """返回 (storage_type, nas_access_url, file_name)"""
+    import os
+
+    file_name = os.path.basename(file_path)
+    local_storage = str(Path(settings.local_storage_path).resolve())
+    nas_mount = settings.nas_mount_path.rstrip("/")
+
+    if settings.nas_mode == "local":
+        storage_type = "local"
+        nas_access_url = None
+    elif settings.nas_mode == "mount":
+        if file_path.startswith(nas_mount) or nas_mount in file_path:
+            storage_type = "nas"
+            nas_access_url = None  # 挂载路径，前端无法直接打开
+        else:
+            storage_type = "local"
+            nas_access_url = None
+    elif settings.nas_mode == "smb":
+        # UNC 路径：\\host\share\... → smb://host/share/...
+        if file_path.startswith("\\\\"):
+            storage_type = "nas"
+            parts = file_path[2:].split("\\", 2)
+            if len(parts) >= 2:
+                host, share = parts[0], parts[1]
+                rest = parts[2] if len(parts) > 2 else ""
+                nas_access_url = f"smb://{host}/{share}/{rest}".rstrip("/")
+            else:
+                nas_access_url = None
+        elif file_path.startswith(nas_mount):
+            storage_type = "nas"
+            # 挂载模式下，尝试从 smb_host/share 构造 URL
+            if settings.nas_smb_host and settings.nas_smb_share:
+                rel = file_path[len(nas_mount):].lstrip("/")
+                nas_access_url = f"smb://{settings.nas_smb_host}/{settings.nas_smb_share}/{rel}".rstrip("/")
+            else:
+                nas_access_url = None
+        else:
+            storage_type = "local"
+            nas_access_url = None
+    else:
+        storage_type = "local"
+        nas_access_url = None
+
+    return storage_type, nas_access_url, file_name
+
+
 @router.get("", response_model=PagedResponse[RecordingOut])
 async def list_recordings(
     db: DBDep,
@@ -34,9 +81,29 @@ async def list_recordings(
     q = q.order_by(Recording.started_at.desc()).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(q)
     items = result.scalars().all()
+    settings = get_settings()
+
+    records = []
+    for r in items:
+        storage_type, nas_access_url, file_name = _compute_recording_extra(r.file_path, settings)
+        records.append(RecordingOut(
+            id=r.id,
+            camera_mac=r.camera_mac,
+            file_path=r.file_path,
+            file_size=r.file_size,
+            duration=r.duration,
+            started_at=r.started_at,
+            ended_at=r.ended_at,
+            status=r.status,
+            error_msg=r.error_msg,
+            created_at=r.created_at,
+            storage_type=storage_type,
+            nas_access_url=nas_access_url,
+            file_name=file_name,
+        ))
 
     return PagedResponse(
-        items=items, total=total, page=page, page_size=page_size,
+        items=records, total=total, page=page, page_size=page_size,
         pages=math.ceil(total / page_size) if total else 0,
     )
 
@@ -70,7 +137,23 @@ async def get_recording(recording_id: int, db: DBDep, _: CurrentUser):
     recording = result.scalar_one_or_none()
     if not recording:
         raise HTTPException(status_code=404, detail="录像不存在")
-    return recording
+    settings = get_settings()
+    storage_type, nas_access_url, file_name = _compute_recording_extra(recording.file_path, settings)
+    return RecordingOut(
+        id=recording.id,
+        camera_mac=recording.camera_mac,
+        file_path=recording.file_path,
+        file_size=recording.file_size,
+        duration=recording.duration,
+        started_at=recording.started_at,
+        ended_at=recording.ended_at,
+        status=recording.status,
+        error_msg=recording.error_msg,
+        created_at=recording.created_at,
+        storage_type=storage_type,
+        nas_access_url=nas_access_url,
+        file_name=file_name,
+    )
 
 
 @router.get("/{recording_id}/stream")
