@@ -16,9 +16,7 @@ router = APIRouter(prefix="/recordings", tags=["recordings"])
 
 def _compute_recording_extra(file_path: str, settings) -> tuple[str, str | None, str]:
     """返回 (storage_type, nas_access_url, file_name)"""
-    import os
-
-    file_name = os.path.basename(file_path)
+    file_name = Path(file_path).name
     local_storage = str(Path(settings.local_storage_path).resolve())
     nas_mount = settings.nas_mount_path.rstrip("/")
 
@@ -40,7 +38,7 @@ def _compute_recording_extra(file_path: str, settings) -> tuple[str, str | None,
             if len(parts) >= 2:
                 host, share = parts[0], parts[1]
                 rest = parts[2] if len(parts) > 2 else ""
-                nas_access_url = f"smb://{host}/{share}/{rest}".rstrip("/")
+                nas_access_url = f"smb://{host}/{share}/{rest.replace('\\', '/')}".rstrip("/")
             else:
                 nas_access_url = None
         elif file_path.startswith(nas_mount):
