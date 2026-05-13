@@ -1,0 +1,1 @@
+"""Infrastructure layer: persistence, external protocols."""

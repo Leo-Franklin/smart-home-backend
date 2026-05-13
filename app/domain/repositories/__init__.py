@@ -1,0 +1,1 @@
+"""Repository interfaces for decoupling ORM from business logic."""
