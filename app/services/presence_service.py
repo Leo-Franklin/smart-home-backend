@@ -206,13 +206,11 @@ class PresenceService:
                 cmd = ["ping", "-n", "1", "-w", "1000", ip]
             else:
                 cmd = ["ping", "-c", "1", "-W", "1", ip]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, lambda: __import__("subprocess").call(cmd, stdout=__import__("subprocess").DEVNULL, stderr=__import__("subprocess").DEVNULL)
             )
-            await asyncio.wait_for(proc.wait(), timeout=3)
-            return proc.returncode == 0
+            return result == 0
         except (asyncio.TimeoutError, Exception):
             return False
 

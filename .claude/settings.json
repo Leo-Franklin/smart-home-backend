@@ -3,7 +3,7 @@
     "superpowers@obra-superpowers": true,
     "superpowers@claude-plugins-official": true,
     "gstack@garrytan-gstack": true,
-    "understand-anything@understand-anything": true
+    "understand-anything@understand-anything": false
   },
   "extraKnownMarketplaces": {
     "obra-superpowers": {

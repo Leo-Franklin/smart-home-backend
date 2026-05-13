@@ -27,7 +27,7 @@ async def list_devices(
     db: DBDep,
     _: CurrentUser,
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(20, ge=1, le=200),
     device_types: list[str] = Query([], alias="device_type"),
     online: bool | None = None,
     search: str | None = Query(None),
