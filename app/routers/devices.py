@@ -41,7 +41,8 @@ async def list_devices(
     if search:
         q = q.where(
             (Device.ip.contains(search)) |
-            (Device.mac.ilike(f"%{search}%"))
+            (Device.mac.ilike(f"%{search}%")) |
+            (Device.alias.ilike(f"%{search}%"))
         )
 
     total_result = await db.execute(select(func.count()).select_from(q.subquery()))
