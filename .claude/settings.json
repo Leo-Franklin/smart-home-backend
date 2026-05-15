@@ -1,24 +1,8 @@
 {
   "enabledPlugins": {
-    "superpowers@obra-superpowers": true,
     "superpowers@claude-plugins-official": true,
-    "gstack@garrytan-gstack": true,
-    "understand-anything@understand-anything": false
+    "understand-anything@understand-anything": false,
+    "playwright@claude-plugins-official": true
   },
-  "extraKnownMarketplaces": {
-    "obra-superpowers": {
-      "source": {
-        "source": "github",
-        "repo": "obra/superpowers",
-        "path": ".claude-plugin"
-      }
-    },
-    "garrytan-gstack": {
-      "source": {
-        "source": "github",
-        "repo": "garrytan/gstack",
-        "path": ".claude-plugin"
-      }
-    }
-  }
+  "extraKnownMarketplaces": {}
 }
