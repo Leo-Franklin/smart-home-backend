@@ -21,6 +21,11 @@ class RecordingDomainService:
         self._nas_syncer = nas_syncer
         self._ws_manager = ws_manager
 
+    async def should_continue_recording(self, camera_mac: str) -> bool:
+        async with AsyncSessionLocal() as db:
+            cam = (await db.execute(select(Camera).where(Camera.device_mac == camera_mac))).scalar_one_or_none()
+            return cam.is_recording if cam else False
+
     async def on_recording_complete(self, task):
         """Handle recording completion: sync to NAS, update DB, trigger DLNA cast."""
         loop = asyncio.get_running_loop()
@@ -50,8 +55,6 @@ class RecordingDomainService:
                     rec.duration = duration
 
             cam = (await db.execute(select(Camera).where(Camera.device_mac == task.camera_mac))).scalar_one_or_none()
-            if cam:
-                cam.is_recording = False
 
             await db.commit()
 
@@ -68,16 +71,69 @@ class RecordingDomainService:
             "recording_id": task.recording_id
         })
 
+    async def _probe_duration(self, path: Path) -> int | None:
+        """Probe actual media duration via ffprobe. Returns None if unreachable or 0."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json",
+                 "-show_format", str(path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                import json
+                d = json.loads(result.stdout)
+                dur = float(d["format"].get("duration", 0))
+                return int(dur) if dur > 0 else None
+        except Exception:
+            pass
+        return None
+
     async def on_recording_failed(self, task, retcode: int, stderr: str):
-        """Handle recording failure: mark failed in DB and broadcast."""
+        """Handle recording failure: probe actual duration, treat as completed if >= 30s."""
+        actual_duration = None
+        dest_str = str(task.output_path)
+
+        # Probe actual media duration from file
+        if task.output_path.exists():
+            loop = asyncio.get_running_loop()
+            try:
+                actual_duration = await loop.run_in_executor(
+                    None, lambda: self._probe_duration(task.output_path)
+                )
+            except Exception:
+                pass
+
         async with AsyncSessionLocal() as db:
             if task.recording_id:
                 result = await db.execute(select(Recording).where(Recording.id == task.recording_id))
                 rec = result.scalar_one_or_none()
                 if rec:
-                    rec.status = "failed"
-                    rec.error_msg = (stderr or f"退出码 {retcode}")[:500]
-                    rec.ended_at = datetime.now()
+                    # If we got ≥30s of actual media, treat as completed (stream was healthy before failure)
+                    if actual_duration is not None and actual_duration >= 30:
+                        ended_at = datetime.now()
+                        rec.status = "completed"
+                        rec.ended_at = ended_at
+                        rec.duration = actual_duration
+                        # Sync to NAS
+                        try:
+                            sync_dest = await loop.run_in_executor(
+                                None, lambda: self._nas_syncer.sync_file(task.output_path, task.camera_mac)
+                            )
+                            rec.file_path = str(sync_dest)
+                            rec.file_size = sync_dest.stat().st_size if sync_dest.exists() else None
+                        except Exception as e:
+                            logger.error(f"NAS同步失败 [{task.camera_mac}]: {e}")
+                            rec.file_path = dest_str
+                            rec.file_size = task.output_path.stat().st_size if task.output_path.exists() else None
+                        logger.info(f"录制异常终止 [{task.camera_mac}] id={task.recording_id}，实际时长={actual_duration}s，标记为completed")
+                    else:
+                        rec.status = "failed"
+                        rec.error_msg = (stderr or f"退出码 {retcode}")[:500]
+                        rec.ended_at = datetime.now()
+                        rec.file_path = dest_str
+                        rec.file_size = task.output_path.stat().st_size if task.output_path.exists() else None
+                        logger.warning(f"录制失败 [{task.camera_mac}] id={task.recording_id}，实际时长={actual_duration}s < 30s，标记为failed")
 
             cam = (await db.execute(select(Camera).where(Camera.device_mac == task.camera_mac))).scalar_one_or_none()
             if cam:
@@ -85,8 +141,7 @@ class RecordingDomainService:
 
             await db.commit()
 
-        logger.error(f"录制失败 [{task.camera_mac}] id={task.recording_id} code={retcode}")
-        await self._ws_manager.broadcast("recording_failed", {
+        await self._ws_manager.broadcast("recording_completed" if actual_duration and actual_duration >= 30 else "recording_failed", {
             "camera_mac": task.camera_mac,
             "recording_id": task.recording_id
         })
