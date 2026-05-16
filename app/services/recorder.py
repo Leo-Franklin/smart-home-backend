@@ -15,6 +15,9 @@ class RecordingTask:
     segment_seconds: int
     rtsp_url: str
     recording_id: int | None = None
+    last_bytes: int = 0
+    last_check: datetime | None = None
+    segment_index: int = 0
 
 
 class Recorder:
@@ -25,10 +28,12 @@ class Recorder:
         self._monitor_task: asyncio.Task | None = None
         self._on_complete_cb = None
         self._on_failed_cb = None
+        self._should_continue_cb = None
 
-    def set_callbacks(self, on_complete=None, on_failed=None):
+    def set_callbacks(self, on_complete=None, on_failed=None, should_continue=None):
         self._on_complete_cb = on_complete
         self._on_failed_cb = on_failed
+        self._should_continue_cb = should_continue
 
     async def start_monitor(self):
         self._monitor_task = asyncio.create_task(self._monitor_loop())
@@ -129,16 +134,114 @@ class Recorder:
     async def _monitor_loop(self):
         while True:
             await asyncio.sleep(10)
-            finished = [
-                (mac, task.process.poll(), task)
-                for mac, task in list(self.active.items())
-                if task.process.poll() is not None
-            ]
+            now = datetime.now()
+            finished = []
+            stalled = []
+            for mac, task in list(self.active.items()):
+                retcode = task.process.poll()
+                if retcode is not None:
+                    finished.append((mac, retcode, task))
+                    continue
+                # Stream health check: detect RTSP disconnection
+                try:
+                    if task.output_path.exists():
+                        current_bytes = task.output_path.stat().st_size
+                        if task.last_check is not None:
+                            elapsed = (now - task.last_check).total_seconds()
+                            grew = current_bytes - task.last_bytes
+                            # If no growth for 90s, stream is dead — terminate segment
+                            if elapsed >= 90 and grew == 0 and current_bytes > 0:
+                                stalled.append((mac, task))
+                                continue
+                        task.last_bytes = current_bytes
+                        task.last_check = now
+                except Exception:
+                    pass
+            # Handle stalled streams — kill then immediately restart new segment
+            for mac, task in stalled:
+                logger.warning(f"[{mac}] RTSP流中断（90s无数据写入），终止segment并立即重启")
+                task.process.kill()
+                # Fire on_failed so DB records this segment (completed if ≥30s, failed otherwise)
+                if self._on_failed_cb:
+                    await self._on_failed_cb(task, -1, "RTSP stream stalled, auto-restart")
+                # Immediately start next segment — same camera, same session
+                # Reuse rtsp_url from the killed task
+                next_index = task.segment_index + 1
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_mac = mac.replace(":", "")
+                seg_path = self.temp_dir / f"{safe_mac}_{ts}_seg{next_index}.mp4"
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-rtsp_transport", "tcp",
+                    "-i", task.rtsp_url,
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-t", str(task.segment_seconds),
+                    "-movflags", "+frag_keyframe+empty_moov",
+                    str(seg_path),
+                ]
+                loop = asyncio.get_event_loop()
+                proc = await loop.run_in_executor(
+                    None,
+                    lambda: subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE),
+                )
+                new_task = RecordingTask(
+                    camera_mac=mac,
+                    process=proc,
+                    output_path=seg_path,
+                    started_at=datetime.now(),
+                    segment_seconds=task.segment_seconds,
+                    rtsp_url=task.rtsp_url,
+                    recording_id=None,  # new segment gets new recording_id on next schedule cron
+                    last_bytes=0,
+                    last_check=None,
+                    segment_index=next_index,
+                )
+                self.active[mac] = new_task
+                logger.info(f"[{mac}] 立即重启segment {next_index}: {seg_path}")
+            # Handle normally finished
             for mac, retcode, task in finished:
                 self.active.pop(mac, None)
                 if retcode == 0:
                     logger.info(f"录制正常完成: {mac}")
-                    if self._on_complete_cb:
+                    # Check should_continue_cb to decide whether to auto-continue
+                    should_continue = self._should_continue_cb() if self._should_continue_cb else False
+                    if should_continue:
+                        # Auto-continue: start new segment with same recording_id
+                        next_index = task.segment_index + 1
+                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        safe_mac = mac.replace(":", "")
+                        seg_path = self.temp_dir / f"{safe_mac}_{ts}_seg{next_index}.mp4"
+                        cmd = [
+                            "ffmpeg", "-y",
+                            "-rtsp_transport", "tcp",
+                            "-i", task.rtsp_url,
+                            "-c:v", "copy",
+                            "-c:a", "aac",
+                            "-t", str(task.segment_seconds),
+                            "-movflags", "+frag_keyframe+empty_moov",
+                            str(seg_path),
+                        ]
+                        loop = asyncio.get_event_loop()
+                        proc = await loop.run_in_executor(
+                            None,
+                            lambda: subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE),
+                        )
+                        new_task = RecordingTask(
+                            camera_mac=mac,
+                            process=proc,
+                            output_path=seg_path,
+                            started_at=datetime.now(),
+                            segment_seconds=task.segment_seconds,
+                            rtsp_url=task.rtsp_url,
+                            recording_id=task.recording_id,
+                            last_bytes=0,
+                            last_check=None,
+                            segment_index=next_index,
+                        )
+                        self.active[mac] = new_task
+                        logger.info(f"[{mac}] 自动继续录制segment {next_index}: {seg_path}")
+                    elif self._on_complete_cb:
                         await self._on_complete_cb(task)
                 else:
                     stderr = task.process.stderr.read().decode(errors="replace")[-500:]
