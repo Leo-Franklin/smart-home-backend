@@ -130,6 +130,20 @@ docker run -d \
 - **DLNA 媒体文件**：上传的媒体文件保存在 `data/dlna_media/`，TTL 为 1 小时，最大 500 MB；支持格式：`.mp4 .mkv .avi .mov .ts .mp3 .m4a .flac .wav .m3u8`。
 - **成员 Webhook**：Webhook URL 必须使用 `https`，且不能指向内网 IP 地址。
 
+## 打包所需外部工具
+
+使用 PyInstaller 打包 Windows exe 前，需在项目根目录放置以下工具：
+
+```
+tools/
+├── ffmpeg/          # 从 https://ffmpeg.org/download.html 下载 Windows 版本
+│   └── ffmpeg.exe   # 放入此目录
+└── nmap/            # 从 https://nmap.org/download.html 下载 Windows 版本
+    └── (nmap 文件)
+```
+
+> 注意：`tools/` 目录已加入 `.gitignore`，不会同步到仓库。若需打包，请手动下载上述工具放置于此目录。
+
 ## 项目结构
 
 ```

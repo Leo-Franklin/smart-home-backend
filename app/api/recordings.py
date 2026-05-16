@@ -38,7 +38,8 @@ def _compute_recording_extra(file_path: str, settings) -> tuple[str, str | None,
             if len(parts) >= 2:
                 host, share = parts[0], parts[1]
                 rest = parts[2] if len(parts) > 2 else ""
-                nas_access_url = f"smb://{host}/{share}/{rest.replace('\\', '/')}".rstrip("/")
+                rest_slashes = rest.replace("\\", "/")
+                nas_access_url = f"smb://{host}/{share}/{rest_slashes}".rstrip("/")
             else:
                 nas_access_url = None
         elif file_path.startswith(nas_mount):

@@ -20,3 +20,6 @@ data/
 
 # Frontend
 frontend/
+
+# External tools (place ffmpeg and nmap here before packaging)
+tools/

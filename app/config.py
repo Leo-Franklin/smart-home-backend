@@ -17,18 +17,27 @@ def is_packaged() -> bool:
     return getattr(sys, "frozen", False)
 
 
+def _read_app_cfg() -> configparser.ConfigParser:
+    """Read app.cfg for packaged mode."""
+    if not is_packaged():
+        return None
+    cfg_path = Path(sys.executable).parent / "app.cfg"
+    if not cfg_path.exists():
+        return None
+    config = configparser.ConfigParser()
+    config.read(cfg_path, encoding="utf-8")
+    return config
+
+
 def get_data_dir() -> Path:
     """
     Packaged mode: read data_dir from app.cfg next to the exe.
     Dev mode: use ./data relative to cwd.
     """
     if is_packaged():
-        exe_dir = Path(sys.executable).parent
-        cfg_path = exe_dir / "app.cfg"
-        config = configparser.ConfigParser()
-        config.read(cfg_path, encoding="utf-8")
-        data_dir_str = config.get("paths", "data_dir", fallback=str(exe_dir / "data"))
-        return Path(data_dir_str)
+        cfg = _read_app_cfg()
+        if cfg and cfg.has_option("paths", "data_dir"):
+            return Path(cfg.get("paths", "data_dir"))
     return Path("./data")
 
 
@@ -37,6 +46,21 @@ _data_dir = get_data_dir()
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # In packaged mode, override from app.cfg
+        if is_packaged():
+            cfg = _read_app_cfg()
+            if cfg:
+                if cfg.has_option("app", "jwt_secret_key"):
+                    object.__setattr__(self, "jwt_secret_key", cfg.get("app", "jwt_secret_key"))
+                if cfg.has_option("app", "admin_username"):
+                    object.__setattr__(self, "admin_username", cfg.get("app", "admin_username"))
+                if cfg.has_option("app", "admin_password"):
+                    object.__setattr__(self, "admin_password", cfg.get("app", "admin_password"))
+                if cfg.has_option("app", "log_level"):
+                    object.__setattr__(self, "log_level", cfg.get("app", "log_level"))
 
     # Network
     network_range: str = "auto"

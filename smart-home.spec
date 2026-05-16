@@ -5,14 +5,20 @@ from pathlib import Path
 block_cipher = None
 
 # Collect WSDL/XSD files for onvif-zeep
-import glob as _glob
 wsdl_src = Path('.venv/Lib/site-packages/wsdl')
 wsdl_files = [(str(f), 'wsdl') for f in wsdl_src.rglob('*') if f.is_file()]
+
+# External tools
+nmap_src = Path('tools/nmap')
+nmap_files = [(str(f), 'nmap') for f in nmap_src.rglob('*') if f.is_file()]
+ffmpeg_files = [
+    (str(Path('tools/ffmpeg/ffmpeg.exe')), 'ffmpeg'),
+]
 
 a = Analysis(
     ['app/main.py'],
     pathex=['.'],
-    binaries=[],
+    binaries=nmap_files + ffmpeg_files,
     datas=[
         ('app', 'app'),
         ('frontend', 'frontend'),
@@ -61,13 +67,13 @@ exe = EXE(
     pyz,
     a.scripts,
     [],
-    exclude_binaries=True,
+    exclude_binaries=False,
     name='SmartHome',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
