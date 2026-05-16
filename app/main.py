@@ -37,7 +37,11 @@ recorder = Recorder(settings.recording_temp_dir)
 nas_syncer = NasSyncer(mode=settings.nas_mode, local_storage_path=settings.local_storage_path, mount_path=settings.nas_mount_path, smb_host=settings.nas_smb_host, smb_share=settings.nas_smb_share, smb_user=settings.nas_smb_user, smb_password=settings.nas_smb_password)
 recording_domain = RecordingDomainService(nas_syncer=nas_syncer)
 presence_domain = PresenceDomainService(recorder=recorder, nas_syncer=nas_syncer)
-recorder.set_callbacks(on_complete=lambda t: recording_domain.on_recording_complete(t), on_failed=lambda t, rc, err: recording_domain.on_recording_failed(t, rc, err))
+recorder.set_callbacks(
+    on_complete=lambda t: recording_domain.on_recording_complete(t),
+    on_failed=lambda t, rc, err: recording_domain.on_recording_failed(t, rc, err),
+    should_continue=lambda mac: recording_domain.should_continue_recording(mac),
+)
 
 
 @asynccontextmanager
