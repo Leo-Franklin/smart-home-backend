@@ -207,7 +207,7 @@ class Recorder:
                 if retcode == 0:
                     logger.info(f"录制正常完成: {mac}")
                     # Check should_continue_cb to decide whether to auto-continue
-                    should_continue = self._should_continue_cb() if self._should_continue_cb else False
+                    should_continue = self._should_continue_cb(mac) if self._should_continue_cb else False
                     if should_continue:
                         # Auto-continue: start new segment with same recording_id
                         next_index = task.segment_index + 1
