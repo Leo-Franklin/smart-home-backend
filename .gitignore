@@ -23,3 +23,6 @@ frontend/
 
 # External tools (place ffmpeg and nmap here before packaging)
 tools/
+
+# Claude Code settings (local plugin config)
+.claude/settings.json
