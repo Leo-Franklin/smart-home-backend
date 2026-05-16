@@ -1,8 +1,0 @@
-{
-  "enabledPlugins": {
-    "superpowers@claude-plugins-official": true,
-    "understand-anything@understand-anything": false,
-    "playwright@claude-plugins-official": true
-  },
-  "extraKnownMarketplaces": {}
-}

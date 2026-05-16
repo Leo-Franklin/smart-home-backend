@@ -25,4 +25,4 @@ frontend/
 tools/
 
 # Claude Code settings (local plugin config)
-.claude/settings.json
+.claude/
